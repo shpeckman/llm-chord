@@ -42,7 +42,7 @@ module LLM::Chord::Delta
       end
     end
 
-    private def diff_value(before : JSON::Any, after : JSON::Any, path : Path) : Nil
+    protected def diff_value(before : JSON::Any, after : JSON::Any, path : Path) : Nil
       return if @overflowed
       return if before == after
       rb = before.raw
