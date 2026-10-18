@@ -88,7 +88,7 @@ module LLM::Chord
       @subscribers << subscriber
       subscriber.push(Frame.new(@value, Delivery.new(DeliveryKind::Hydrate, @sequence)))
       subscriber.drain
-      ->{ subscriber.close; @subscribers.delete(subscriber) }
+      -> { subscriber.close; @subscribers.delete(subscriber) }
     end
 
     def publish(value : JSON::Any) : Nil
