@@ -8,7 +8,9 @@ module LLM::Chord::Delta
 
     struct Replace < Op
       getter value : JSON::Any
+
       def initialize(@value : JSON::Any); end
+
       def verb : Char
         'r'
       end
@@ -17,7 +19,9 @@ module LLM::Chord::Delta
     struct Set < Op
       getter path : Path
       getter value : JSON::Any
+
       def initialize(@path : Path, @value : JSON::Any); end
+
       def verb : Char
         's'
       end
@@ -25,7 +29,9 @@ module LLM::Chord::Delta
 
     struct Delete < Op
       getter path : Path
+
       def initialize(@path : Path); end
+
       def verb : Char
         'd'
       end
@@ -34,7 +40,9 @@ module LLM::Chord::Delta
     struct Append < Op
       getter path : Path
       getter text : String
+
       def initialize(@path : Path, @text : String); end
+
       def verb : Char
         'a'
       end
@@ -43,7 +51,9 @@ module LLM::Chord::Delta
     struct Truncate < Op
       getter path : Path
       getter count : Int32
+
       def initialize(@path : Path, @count : Int32); end
+
       def verb : Char
         't'
       end
@@ -54,7 +64,9 @@ module LLM::Chord::Delta
       getter index : Int32
       getter remove : Int32
       getter items : Array(JSON::Any)
+
       def initialize(@path : Path, @index : Int32, @remove : Int32, @items : Array(JSON::Any)); end
+
       def verb : Char
         'p'
       end
@@ -63,7 +75,9 @@ module LLM::Chord::Delta
     struct Move < Op
       getter path : Path
       getter permutation : Array(Int32)
+
       def initialize(@path : Path, @permutation : Array(Int32)); end
+
       def verb : Char
         'm'
       end

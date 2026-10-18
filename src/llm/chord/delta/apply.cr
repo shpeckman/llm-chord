@@ -68,13 +68,13 @@ module LLM::Chord::Delta
 
   private def self.op_path(op : Op) : Path
     case op
-    when Op::Set then op.path
-    when Op::Delete then op.path
-    when Op::Append then op.path
+    when Op::Set      then op.path
+    when Op::Delete   then op.path
+    when Op::Append   then op.path
     when Op::Truncate then op.path
-    when Op::Splice then op.path
-    when Op::Move then op.path
-    else raise ArgumentError.new("replace op has no path")
+    when Op::Splice   then op.path
+    when Op::Move     then op.path
+    else                   raise ArgumentError.new("replace op has no path")
     end
   end
 

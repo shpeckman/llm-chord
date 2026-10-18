@@ -6,7 +6,7 @@ module LLM::Chord::Delta
 
   class Diff
     DEFAULT_OVERLAP_SCAN = 65_536
-    MAX_DELTA_OPERATIONS = 4_096
+    MAX_DELTA_OPERATIONS =  4_096
     MAX_LCS_CELLS        = 65_536
 
     @ops = [] of Op
@@ -107,7 +107,7 @@ module LLM::Chord::Delta
 
     private def diff_array_region(
       before : Array(JSON::Any), after : Array(JSON::Any), path : Path,
-      before_start : Int32, before_end : Int32, after_start : Int32, after_end : Int32, output_start : Int32
+      before_start : Int32, before_end : Int32, after_start : Int32, after_end : Int32, output_start : Int32,
     ) : Nil
       return if @overflowed
       while before_start < before_end && after_start < after_end && before[before_start] == after[after_start]
@@ -155,7 +155,7 @@ module LLM::Chord::Delta
     private def process_array_matches(
       before : Array(JSON::Any), after : Array(JSON::Any), path : Path,
       before_start : Int32, before_end : Int32, after_start : Int32, after_end : Int32, output_start : Int32,
-      matches : Array({Int32, Int32})
+      matches : Array({Int32, Int32}),
     ) : Nil
       before_at = before_start
       after_at = after_start
@@ -174,7 +174,7 @@ module LLM::Chord::Delta
 
     private def lcs_matches(before : Array(JSON::Any), after : Array(JSON::Any)) : Array({Int32, Int32})?
       return [] of {Int32, Int32} if before.empty? || after.empty?
-      return nil if before.size.to_i64 * after.size.to_i64 > MAX_LCS_CELLS
+      return if before.size.to_i64 * after.size.to_i64 > MAX_LCS_CELLS
       width = after.size + 1
       heights = before.size + 1
       lengths = Slice(Int32).new(heights * width, 0)
@@ -206,7 +206,7 @@ module LLM::Chord::Delta
     end
 
     private def permutation(before : Array(JSON::Any), after : Array(JSON::Any)) : Array(Int32)?
-      return nil unless before.size == after.size
+      return unless before.size == after.size
       positions = {} of JSON::Any => Array(Int32)
       before.each_with_index do |value, index|
         (positions[value] ||= [] of Int32) << index
@@ -215,9 +215,9 @@ module LLM::Chord::Delta
       result = Array(Int32).new(after.size)
       after.each do |value|
         indices = positions[value]?
-        return nil unless indices
+        return unless indices
         used_count = used[value]? || 0
-        return nil if used_count >= indices.size
+        return if used_count >= indices.size
         result << indices[used_count]
         used[value] = used_count + 1
       end

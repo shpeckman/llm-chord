@@ -35,52 +35,52 @@ module LLM::Chord::Delta
 
     private def op_path(op : Op) : Path
       case op
-      when Op::Set then op.path
-      when Op::Delete then op.path
-      when Op::Append then op.path
+      when Op::Set      then op.path
+      when Op::Delete   then op.path
+      when Op::Append   then op.path
       when Op::Truncate then op.path
-      when Op::Splice then op.path
-      when Op::Move then op.path
-      else raise ArgumentError.new("replace op has no path")
+      when Op::Splice   then op.path
+      when Op::Move     then op.path
+      else                   raise ArgumentError.new("replace op has no path")
       end
     end
 
     private def intern(path : Path, key : String, result : Array(JSON::Any)) : Path | Int32
       if id = @ids[key]?
-        return id
+        id
       elsif @seen.includes?(key)
         id = @next_id
         @next_id += 1
         @ids[key] = id
         result << arr([s("#"), i(id), path_wire(path)])
-        return id
+        id
       else
         @seen.add(key)
-        return path
+        path
       end
     end
 
     private def full_wire(op : Op, ref : Path | Int32) : JSON::Any
       case op
-      when Op::Set then arr([s("s"), ref_wire(ref), op.value])
-      when Op::Delete then arr([s("d"), ref_wire(ref)])
-      when Op::Append then arr([s("a"), ref_wire(ref), s(op.text)])
+      when Op::Set      then arr([s("s"), ref_wire(ref), op.value])
+      when Op::Delete   then arr([s("d"), ref_wire(ref)])
+      when Op::Append   then arr([s("a"), ref_wire(ref), s(op.text)])
       when Op::Truncate then arr([s("t"), ref_wire(ref), i(op.count)])
-      when Op::Splice then arr([s("p"), ref_wire(ref), i(op.index), i(op.remove), items_wire(op.items)])
-      when Op::Move then arr([s("m"), ref_wire(ref), perm_wire(op.permutation)])
-      else raise ArgumentError.new("replace op has no path")
+      when Op::Splice   then arr([s("p"), ref_wire(ref), i(op.index), i(op.remove), items_wire(op.items)])
+      when Op::Move     then arr([s("m"), ref_wire(ref), perm_wire(op.permutation)])
+      else                   raise ArgumentError.new("replace op has no path")
       end
     end
 
     private def short_wire(op : Op) : JSON::Any
       case op
-      when Op::Set then arr([s("s"), op.value])
-      when Op::Delete then arr([s("d")])
-      when Op::Append then arr([s("a"), s(op.text)])
+      when Op::Set      then arr([s("s"), op.value])
+      when Op::Delete   then arr([s("d")])
+      when Op::Append   then arr([s("a"), s(op.text)])
       when Op::Truncate then arr([s("t"), i(op.count)])
-      when Op::Splice then arr([s("p"), i(op.index), i(op.remove), items_wire(op.items)])
-      when Op::Move then arr([s("m"), perm_wire(op.permutation)])
-      else raise ArgumentError.new("replace op has no path")
+      when Op::Splice   then arr([s("p"), i(op.index), i(op.remove), items_wire(op.items)])
+      when Op::Move     then arr([s("m"), perm_wire(op.permutation)])
+      else                   raise ArgumentError.new("replace op has no path")
       end
     end
 
@@ -199,8 +199,8 @@ module LLM::Chord::Delta
       raw.map do |seg_any|
         case raw_seg = seg_any.raw
         when String then raw_seg
-        when Int64 then raw_seg.to_i32
-        else raise ArgumentError.new("bad path segment")
+        when Int64  then raw_seg.to_i32
+        else             raise ArgumentError.new("bad path segment")
         end
       end
     end
