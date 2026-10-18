@@ -23,4 +23,9 @@ describe LLM::Chord::Json do
     LLM::Chord::Json.container?(JSON.parse(%(1))).should be_false
     LLM::Chord::Json.container?(JSON.parse(%(null))).should be_false
   end
+
+  it "converts Crystal values to JSON::Any" do
+    LLM::Chord::Json.to_any({"a" => 1, "b" => [true, nil]}).should eq JSON.parse(%({"a":1,"b":[true,null]}))
+    LLM::Chord::Json.to_any(42).raw.should eq 42_i64
+  end
 end
