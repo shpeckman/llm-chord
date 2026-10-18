@@ -5,7 +5,9 @@ require "../src/llm-chord"
 include LLM::Chord::Delta
 
 def path(*segs : String | Int32) : LLM::Chord::Delta::Path
-  segs.to_a
+  result = [] of String | Int32
+  segs.each { |seg| result << seg }
+  result
 end
 
 def diff_revisions(before : JSON::Any, after : JSON::Any) : Array(Op)
