@@ -1,0 +1,14 @@
+# shard.yml
+name: llm-chord
+version: 0.1.0
+
+authors:
+  - shpeckman
+
+description: |
+  Transactional JSON revision tracking and operation batches, ported from
+  @earendil-works/chord/delta.
+
+crystal: ">= 1.21.0"
+
+license: MIT
