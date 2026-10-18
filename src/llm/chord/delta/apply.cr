@@ -106,7 +106,11 @@ module LLM::Chord::Delta
     else
       raise PathError.new([] of Seg) unless raw.is_a?(Array)
       raise UnsafePathError.new(key) if key > raw.size
-      raw[key] = value
+      if key == raw.size
+        raw << value
+      else
+        raw[key] = value
+      end
     end
   end
 
