@@ -84,6 +84,26 @@ wire = LLM::Chord::Delta::Encoder.new.encode(ops)
 ops  = LLM::Chord::Delta::Decoder.new.decode(wire)
 ```
 
+### Replicated state
+
+Observable immutable state over the tracker:
+
+```crystal
+state = LLM::Chord.replicated_state(JSON.parse(%({"n":0})))
+
+unsub = state.subscribe do |value, delivery|
+  # delivery.kind : Hydrate | Update, delivery.sequence : Int32
+  puts value.to_json
+end
+
+state.change { |draft| draft["n"] = 1 }       # atomic; publishes on non-noop
+state.replace(JSON.parse(%({"fresh":true})))  # atomic whole-root replace
+unsub.call
+```
+
+`replicated_state(source)` attaches a publication-only view to an external
+authoritative stream (`ReplicatedStateSource`).
+
 ## Operations
 
 | Verb | Struct          | Meaning                                      |
@@ -116,6 +136,13 @@ different tuples, and large edits may fold into a whole-root `r`.
   `Op::Replace`, `Op::Set`, `Op::Delete`, `Op::Append`, `Op::Truncate`,
   `Op::Splice`, `Op::Move`; `Draft` (mutable draft wrapper over `JSON::Any`)
 - Errors: `LLM::Chord::Delta::UnsafePathError`, `LLM::Chord::Delta::PathError`
+- `LLM::Chord.replicated_state(initial)` → `MutableReplicatedState`
+  (`#value`, `#subscribe`, `#change`, `#replace`)
+- `LLM::Chord.replicated_state(source)` → `AttachedReplicatedState`
+  (`#value`, `#subscribe`, `#activate`, `#dispose`)
+- `LLM::Chord::Delivery` (`kind`, `sequence`), `LLM::Chord::DeliveryKind`,
+  `LLM::Chord::ReplicatedStateSource`, `LLM::Chord::ReplicatedStateSourceAttachment`,
+  `LLM::Chord::Snapshot`, `LLM::Chord::SourceFrame`
 
 ## Development
 
