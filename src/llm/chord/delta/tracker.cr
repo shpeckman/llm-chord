@@ -30,12 +30,12 @@ module LLM::Chord::Delta
     end
 
     def state : JSON::Any
-      raise Error.new("Cannot use a settled change") if @settled
+      raise Exception.new("Cannot use a settled change") if @settled
       @state
     end
 
     def prepare : Prepared
-      raise Error.new("Change has already been settled") if @settled
+      raise Exception.new("Change has already been settled") if @settled
       @settled = true
       ops = LLM::Chord::Delta.diff_revisions(@base, @state)
       value = ops.empty? ? @base : @state
@@ -71,9 +71,9 @@ module LLM::Chord::Delta
     end
 
     def adopt(prepared : Prepared) : Nil
-      raise Error.new("Prepared change belongs to a different tracker") unless prepared.tracker_id == @id
-      raise Error.new("Prepared change has been aborted") if prepared.aborted?
-      raise Error.new("Prepared change is stale") unless prepared.base_revision == @revision
+      raise Exception.new("Prepared change belongs to a different tracker") unless prepared.tracker_id == @id
+      raise Exception.new("Prepared change has been aborted") if prepared.aborted?
+      raise Exception.new("Prepared change is stale") unless prepared.base_revision == @revision
       @value = prepared.value
       @revision += 1
     end
