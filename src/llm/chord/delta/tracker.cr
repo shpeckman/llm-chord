@@ -55,7 +55,7 @@ module LLM::Chord::Delta
 
     def initialize(@value : JSON::Any)
       @revision = 0
-      @id = @@next_id
+      @id : UInt64 = @@next_id
       @@next_id += 1
     end
 
