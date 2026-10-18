@@ -1,7 +1,7 @@
 # src/llm/chord/delta/diff.cr
 module LLM::Chord::Delta
   def self.diff_revisions(before : JSON::Any, after : JSON::Any) : Array(Op)
-    Diff.revisions(before, after)
+    Diff.new.run(before, after)
   end
 
   class Diff
@@ -12,11 +12,10 @@ module LLM::Chord::Delta
     @ops = [] of Op
     @overflowed = false
 
-    def self.revisions(before : JSON::Any, after : JSON::Any) : Array(Op)
-      diff = new
-      diff.diff_value(before, after, [] of Seg)
-      return [Op::Replace.new(after)] of Op if diff.@overflowed
-      ops = diff.@ops
+    def run(before : JSON::Any, after : JSON::Any) : Array(Op)
+      diff_value(before, after, [] of Seg)
+      return [Op::Replace.new(after)] of Op if @overflowed
+      ops = @ops
       return ops if ops.empty? || ops.first.is_a?(Op::Replace)
       delta_cost = 2
       ops.each { |op| delta_cost += op_cost(op) + 1 }
