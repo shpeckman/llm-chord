@@ -38,6 +38,6 @@ describe LLM::Chord::Delta::Draft do
   it "reports missing keys as nil" do
     tracker = track(JSON.parse(%({})))
     change = tracker.begin_change
-    change.state["missing"].nil?.should be_true
+    change.state["missing"].null?.should be_true
   end
 end

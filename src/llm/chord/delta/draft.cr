@@ -66,7 +66,7 @@ module LLM::Chord::Delta
       @value.as_h
     end
 
-    def nil? : Bool
+    def null? : Bool
       @value.raw.nil?
     end
   end
