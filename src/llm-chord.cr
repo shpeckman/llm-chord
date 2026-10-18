@@ -7,6 +7,7 @@ require "./llm/chord/delta/apply"
 require "./llm/chord/delta/codec"
 require "./llm/chord/delta/draft"
 require "./llm/chord/delta/tracker"
+require "./llm/chord/state"
 
 module LLM::Chord
 end
