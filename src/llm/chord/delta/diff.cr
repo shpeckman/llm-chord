@@ -139,9 +139,11 @@ module LLM::Chord::Delta
         end
       end
       if matches = lcs_matches(before[before_start...before_end], after[after_start...after_end])
-        absolute = matches.map { |(before_index, after_index)| {before_start + before_index, after_start + after_index} }
-        process_array_matches(before, after, path, before_start, before_end, after_start, after_end, output_start, absolute)
-        return
+        unless matches.empty?
+          absolute = matches.map { |(before_index, after_index)| {before_start + before_index, after_start + after_index} }
+          process_array_matches(before, after, path, before_start, before_end, after_start, after_end, output_start, absolute)
+          return
+        end
       end
       if before_count == 1 && after_count == 1
         diff_value(before[before_start], after[after_start], path + [output_start])
