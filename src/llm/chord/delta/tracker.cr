@@ -65,7 +65,7 @@ module LLM::Chord::Delta
     end
 
     def prepare_replace(value : JSON::Any) : Prepared
-      ops = Diff.revisions(@value, value)
+      ops = LLM::Chord::Delta.diff_revisions(@value, value)
       result = ops.empty? ? @value : value
       Prepared.new(@id, @value, result, ops, @revision)
     end
