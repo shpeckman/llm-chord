@@ -116,11 +116,13 @@ module LLM::Chord::Delta
   class Decoder
     def initialize
       @paths = {} of Int32 => Path
-      @previous : Path? = nil
+      @previous = [] of Seg
+      @has_previous = false
     end
 
     def decode(wire : Array(JSON::Any)) : Array(Op)
-      @previous = nil
+      @previous = [] of Seg
+      @has_previous = false
       result = [] of Op
       wire.each do |op_any|
         arr = op_any.raw
@@ -136,7 +138,7 @@ module LLM::Chord::Delta
           raise ArgumentError.new("r arity") unless arr.size == 2
           result << Op::Replace.new(arr[1])
           @paths.clear
-          @previous = nil
+          @has_previous = false
         else
           result << decode_op(arr)
         end
@@ -151,8 +153,8 @@ module LLM::Chord::Delta
               (verb == "p" && arr.size == 4)
       path : Path
       if short
-        raise PathError.new([] of Seg) if @previous.nil?
-        path = @previous.not_nil!
+        raise PathError.new([] of Seg) unless @has_previous
+        path = @previous
       else
         ref = arr[1]
         if ref.raw.is_a?(Int64)
@@ -164,6 +166,7 @@ module LLM::Chord::Delta
           path = parse_path(ref)
         end
         @previous = path
+        @has_previous = true
       end
       raise PathError.new(path) if verb != "p" && verb != "m" && path.empty?
       case verb
