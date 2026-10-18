@@ -37,7 +37,7 @@ module LLM::Chord::Delta
     def prepare : Prepared
       raise Error.new("Change has already been settled") if @settled
       @settled = true
-      ops = Diff.revisions(@base, @state)
+      ops = LLM::Chord::Delta.diff_revisions(@base, @state)
       value = ops.empty? ? @base : @state
       Prepared.new(@tracker_id, @base, value, ops, @base_revision)
     end
