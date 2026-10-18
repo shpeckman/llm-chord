@@ -7,38 +7,39 @@ module LLM::Chord::Delta
 
     def [](key : String) : Draft
       raw = @value.raw
-      raise TypeError.new("Draft is not an object") unless raw.is_a?(Hash)
+      raise Exception.new("Draft is not an object") unless raw.is_a?(Hash)
       Draft.new(raw[key]? || JSON::Any.new(nil))
     end
 
     def []?(key : String) : Draft?
       raw = @value.raw
-      return nil unless raw.is_a?(Hash)
-      child = raw[key]?
-      child ? Draft.new(child) : nil
+      if raw.is_a?(Hash)
+        child = raw[key]?
+        child ? Draft.new(child) : nil
+      end
     end
 
     def [](index : Int) : Draft
       raw = @value.raw
-      raise TypeError.new("Draft is not an array") unless raw.is_a?(Array)
+      raise Exception.new("Draft is not an array") unless raw.is_a?(Array)
       Draft.new(raw[index])
     end
 
     def []=(key : String, value) : Nil
       raw = @value.raw
-      raise TypeError.new("Draft is not an object") unless raw.is_a?(Hash)
+      raise Exception.new("Draft is not an object") unless raw.is_a?(Hash)
       raw[key] = Json.to_any(value)
     end
 
     def []=(index : Int, value) : Nil
       raw = @value.raw
-      raise TypeError.new("Draft is not an array") unless raw.is_a?(Array)
+      raise Exception.new("Draft is not an array") unless raw.is_a?(Array)
       raw[index] = Json.to_any(value)
     end
 
     def <<(value) : Nil
       raw = @value.raw
-      raise TypeError.new("Draft is not an array") unless raw.is_a?(Array)
+      raise Exception.new("Draft is not an array") unless raw.is_a?(Array)
       raw << Json.to_any(value)
     end
 
