@@ -10,10 +10,10 @@ module LLM::Chord::Delta
 
     def encode(ops : Array(Op)) : Array(JSON::Any)
       @previous = nil
-      out = [] of JSON::Any
+      result = [] of JSON::Any
       ops.each do |op|
         if op.is_a?(Op::Replace)
-          out << arr([s("r"), op.value])
+          result << arr([s("r"), op.value])
           @seen.clear
           @ids.clear
           @next_id = 0
@@ -23,14 +23,14 @@ module LLM::Chord::Delta
         path = op_path(op)
         key = path.to_json
         if key == @previous
-          out << short_wire(op)
+          result << short_wire(op)
           next
         end
-        ref = intern(path, key, out)
-        out << full_wire(op, ref)
+        ref = intern(path, key, result)
+        result << full_wire(op, ref)
         @previous = key
       end
-      out
+      result
     end
 
     private def op_path(op : Op) : Path
@@ -45,14 +45,14 @@ module LLM::Chord::Delta
       end
     end
 
-    private def intern(path : Path, key : String, out : Array(JSON::Any)) : Path | Int32
+    private def intern(path : Path, key : String, result : Array(JSON::Any)) : Path | Int32
       if id = @ids[key]?
         return id
       elsif @seen.includes?(key)
         id = @next_id
         @next_id += 1
         @ids[key] = id
-        out << arr([s("#"), i(id), path_wire(path)])
+        result << arr([s("#"), i(id), path_wire(path)])
         return id
       else
         @seen.add(key)
@@ -121,7 +121,7 @@ module LLM::Chord::Delta
 
     def decode(wire : Array(JSON::Any)) : Array(Op)
       @previous = nil
-      out = [] of Op
+      result = [] of Op
       wire.each do |op_any|
         arr = op_any.raw
         raise ArgumentError.new("op is not a tuple") unless arr.is_a?(Array) && !arr.empty?
@@ -134,14 +134,14 @@ module LLM::Chord::Delta
           @paths[id] = path
         when "r"
           raise ArgumentError.new("r arity") unless arr.size == 2
-          out << Op::Replace.new(arr[1])
+          result << Op::Replace.new(arr[1])
           @paths.clear
           @previous = nil
         else
-          out << decode_op(arr)
+          result << decode_op(arr)
         end
       end
-      out
+      result
     end
 
     private def decode_op(arr : Array(JSON::Any)) : Op
