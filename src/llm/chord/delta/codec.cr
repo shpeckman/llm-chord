@@ -5,7 +5,7 @@ module LLM::Chord::Delta
       @seen = Set(String).new
       @ids = {} of String => Int32
       @next_id = 0
-      @previous : String? = nil
+      @previous = nil.as(String?)
     end
 
     def encode(ops : Array(Op)) : Array(JSON::Any)
