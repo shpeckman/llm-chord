@@ -231,7 +231,7 @@ module LLM::Chord
     end
   end
 
-  RAISE_ON_ERROR = ->(ex : Exception) { raise ex }.as(Proc(Exception, Nil))
+  RAISE_ON_ERROR = Proc(Exception, Nil).new { |ex| raise ex }
 
   def self.replicated_state(initial : JSON::Any, on_error : Proc(Exception, Nil)? = nil) : MutableReplicatedState
     MutableReplicatedState.new(initial, on_error || RAISE_ON_ERROR)
