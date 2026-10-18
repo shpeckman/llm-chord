@@ -71,3 +71,7 @@ public API), `Lint/NotNil` (`not_nil!` is used intentionally), and
   must not mutate the root after handing it over.
 - `apply_immutable` deep-copies rather than sharing subtrees with the input;
   the result is fully independent of `target` and the op payloads.
+- `replicated_state` (`state.cr`) drops chord's `Context` and async listeners:
+  listeners are synchronous blocks, and `value` is `JSON::Any`. Delivery is
+  hydrate-then-update with per-subscriber backpressure and reentrancy-safe
+  queuing; subscriber errors go to an `on_error` proc.
