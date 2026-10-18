@@ -164,6 +164,7 @@ module LLM::Chord::Delta
           path = resolved
         else
           path = parse_path(ref)
+          LLM::Chord::Delta.assert_safe_path(path)
         end
         @previous = path
         @has_previous = true
