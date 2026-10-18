@@ -49,13 +49,14 @@ module LLM::Chord::Delta
 
   class Tracker
     @@next_id = 0_u64
+    @id : UInt64
 
     getter value : JSON::Any
     getter revision : Int32
 
     def initialize(@value : JSON::Any)
       @revision = 0
-      @id : UInt64 = @@next_id
+      @id = @@next_id
       @@next_id += 1
     end
 
