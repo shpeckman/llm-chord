@@ -126,7 +126,8 @@ module LLM::Chord::Delta
       result = [] of Op
       wire.each do |op_any|
         arr = op_any.raw
-        raise ArgumentError.new("op is not a tuple") unless arr.is_a?(Array) && !arr.empty?
+        raise ArgumentError.new("op is not a tuple") unless arr.is_a?(Array)
+        raise ArgumentError.new("op is not a tuple") if arr.empty?
         case arr[0].as_s
         when "#"
           raise ArgumentError.new("# shape") unless arr.size == 3
