@@ -48,7 +48,7 @@ module LLM::Chord::Delta
     end
 
     def as_i : Int64
-      @value.as_i
+      @value.raw.as(Int64)
     end
 
     def as_f : Float64
