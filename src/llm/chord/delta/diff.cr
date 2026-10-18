@@ -15,14 +15,14 @@ module LLM::Chord::Delta
     def self.revisions(before : JSON::Any, after : JSON::Any) : Array(Op)
       diff = new
       diff.diff_value(before, after, [] of Seg)
-      return [Op::Replace.new(after)] if diff.@overflowed
+      return [Op::Replace.new(after)] of Op if diff.@overflowed
       ops = diff.@ops
       return ops if ops.empty? || ops.first.is_a?(Op::Replace)
       delta_cost = 2
       ops.each { |op| delta_cost += op_cost(op) + 1 }
       return ops if delta_cost < 65_536
       snapshot_cost = json_cost(after) + 6
-      delta_cost >= snapshot_cost ? [Op::Replace.new(after)] : ops
+      delta_cost >= snapshot_cost ? [Op::Replace.new(after)] of Op : ops
     end
 
     private def emit(op : Op) : Nil
