@@ -55,9 +55,12 @@ public API), `Lint/NotNil` (`not_nil!` is used intentionally), and
 - Values are `JSON::Any`; paths are `Seg = String | Int32` with `Path = Array(Seg)`.
   Array indices are `Int32`; JSON integers are `Int64` (converted at the wire
   boundary in the codec).
+- The op vocabulary is `r`/`s`/`d`/`a`/`t`/`p`/`m`, represented as a sealed
   `Op` struct hierarchy (`Op::Replace`, `Op::Set`, `Op::Delete`, `Op::Append`,
   `Op::Truncate`, `Op::Splice`, `Op::Move`). The wire codec is the only place
   that knows the JSON tuple form.
+- `Change#state` returns a `Draft` wrapper; mutations auto-convert via
+  `Json.to_any`, which round-trips through `value.to_json`.
 - The mutable draft is implemented as clone + diff, not chord's JS Proxy:
   `begin_change` deep-copies the base, and `prepare` runs `diff_revisions`
   against it. This reproduces the observable contract (value, op vocabulary,
