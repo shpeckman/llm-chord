@@ -14,7 +14,7 @@ describe LLM::Chord::Delta do
     it "adopts a mutated change" do
       tracker = track(JSON.parse(%({"n":0})))
       change = tracker.begin_change
-      change.state.as_h["n"] = JSON::Any.new(1_i64)
+      change.state["n"] = 1
       prepared = change.prepare
       prepared.ops.should_not be_empty
       tracker.adopt(prepared)
@@ -35,10 +35,10 @@ describe LLM::Chord::Delta do
     it "rejects a stale prepared change after a competing adopt" do
       tracker = track(JSON.parse(%({"n":0})))
       first = tracker.begin_change
-      first.state.as_h["n"] = JSON::Any.new(1_i64)
+      first.state["n"] = 1
       p1 = first.prepare
       second = tracker.begin_change
-      second.state.as_h["n"] = JSON::Any.new(2_i64)
+      second.state["n"] = 2
       p2 = second.prepare
       tracker.adopt(p1)
       expect_raises(Exception) { tracker.adopt(p2) }
@@ -47,7 +47,7 @@ describe LLM::Chord::Delta do
     it "rejects an aborted prepared change" do
       tracker = track(JSON.parse(%({"n":0})))
       change = tracker.begin_change
-      change.state.as_h["n"] = JSON::Any.new(1_i64)
+      change.state["n"] = 1
       prepared = change.prepare
       prepared.abort
       expect_raises(Exception) { tracker.adopt(prepared) }
