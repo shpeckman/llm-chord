@@ -19,6 +19,7 @@ src/llm/chord/delta/apply.cr       apply, apply_immutable, apply_immutable_batch
 src/llm/chord/delta/codec.cr       Encoder/Decoder (path interning + arity omission)
 src/llm/chord/delta/draft.cr       Draft wrapper (ergonomic mutation over JSON::Any)
 src/llm/chord/delta/tracker.cr     track, Tracker, Change, Prepared
+src/llm/chord/state.cr            replicated_state: observable authoritative + source state
 spec/                              Crystal specs (one file per unit)
 .ameba.yml                         Ameba linter config (disabled rules)
 ```
