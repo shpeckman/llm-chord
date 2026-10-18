@@ -103,17 +103,18 @@ different tuples, and large edits may fold into a whole-root `r`.
 
 - `LLM::Chord::Delta.track(initial : JSON::Any) : Tracker`
 - `Tracker#value`, `#revision`, `#begin_change`, `#prepare_replace`, `#adopt`
-- `Change#state`, `#prepare`, `#abort`
+- `Change#state` (`Draft`), `#prepare`, `#abort`
 - `Prepared#base`, `#value`, `#ops`, `#base_revision`, `#abort`
 - `LLM::Chord::Delta.diff_revisions(before, after) : Array(Op)`
 - `LLM::Chord::Delta.apply(target, ops)`, `.apply_immutable(target, ops)`,
   `.apply_immutable_batches(target, batches)`
 - `LLM::Chord::Delta::Encoder#encode(ops)`, `LLM::Chord::Delta::Decoder#decode(wire)`
 - `LLM::Chord::Delta.overlap(a, b, scan, probe = 64, max_candidates = 8)`
-- `LLM::Chord::Json.deep_copy`, `LLM::Chord::Json.container?`, `LLM::Chord::Json.valid?`
+- `LLM::Chord::Json.deep_copy`, `LLM::Chord::Json.container?`, `LLM::Chord::Json.valid?`,
+  `LLM::Chord::Json.to_any`
 - Types: `Seg = String | Int32`, `Path = Array(Seg)`, `Op` (abstract) with
   `Op::Replace`, `Op::Set`, `Op::Delete`, `Op::Append`, `Op::Truncate`,
-  `Op::Splice`, `Op::Move`
+  `Op::Splice`, `Op::Move`; `Draft` (mutable draft wrapper over `JSON::Any`)
 - Errors: `LLM::Chord::Delta::UnsafePathError`, `LLM::Chord::Delta::PathError`
 
 ## Development
