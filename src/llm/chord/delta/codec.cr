@@ -132,7 +132,7 @@ module LLM::Chord::Delta
           raise ArgumentError.new("# shape") unless arr.size == 3
           id = int(arr[1])
           path = parse_path(arr[2])
-          assert_safe_path(path)
+          LLM::Chord::Delta.assert_safe_path(path)
           @paths[id] = path
         when "r"
           raise ArgumentError.new("r arity") unless arr.size == 2
