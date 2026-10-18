@@ -36,8 +36,8 @@ require "llm-chord"
 tracker = LLM::Chord::Delta.track(JSON.parse(%({"output":"","entries":[]})))
 
 change = tracker.begin_change
-change.state.as_h["output"] = JSON::Any.new("done\n")
-change.state.as_h["entries"].as_a << JSON::Any.new({"id" => JSON::Any.new(1_i64)})
+change.state["output"] = "done\n"
+change.state["entries"] << {"id" => 1}
 prepared = change.prepare
 
 tracker.adopt(prepared)
