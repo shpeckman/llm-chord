@@ -5,6 +5,7 @@ require "./llm/chord/delta/overlap"
 require "./llm/chord/delta/diff"
 require "./llm/chord/delta/apply"
 require "./llm/chord/delta/codec"
+require "./llm/chord/delta/draft"
 require "./llm/chord/delta/tracker"
 
 module LLM::Chord

@@ -23,6 +23,10 @@ module LLM::Chord
       raw.is_a?(Hash) || raw.is_a?(Array)
     end
 
+    def self.to_any(value) : JSON::Any
+      JSON.parse(value.to_json)
+    end
+
     def self.valid?(value : JSON::Any) : Bool
       case raw = value.raw
       when Float64

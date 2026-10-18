@@ -29,9 +29,9 @@ module LLM::Chord::Delta
       @settled = false
     end
 
-    def state : JSON::Any
+    def state : Draft
       raise Exception.new("Cannot use a settled change") if @settled
-      @state
+      Draft.new(@state)
     end
 
     def prepare : Prepared
