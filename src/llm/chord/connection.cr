@@ -625,10 +625,36 @@ module LLM::Chord
       when "result"        then on_result(frame)
       when "state"         then on_state(frame)
       when "root_end"      then @host.foreign_root_ended(frame.string("rootId"), self)
-      when "vote"          then violation("vote from a non-participant")
+      when "vote"          then on_vote(frame)
       when "invalidate", "prepare", "commit", "abort", "retire"
         on_control(frame)
       end
+    end
+
+    private def on_vote(frame : Frame) : Nil
+      unless @role.downstream? && @peer.kind.host?
+        violation("vote from a non-participant")
+        return
+      end
+      future = @votes.delete(frame.int("reload").to_i32)
+      return unless future
+      if error = frame["error"]?
+        future.reject(Wire.from_error(error))
+      else
+        future.resolve(frame["report"]?)
+      end
+    end
+
+    private def admit_root(root : JSON::Any?) : JSON::Any?
+      return nil unless root
+      version = root["codeVersion"].as_i
+      if @fenced_code_versions.includes?(version) && !@host.has_code_version?(version)
+        root_id = root["rootId"].as_s
+        admitted = @admitted[root_id]? || @host.code_version
+        @admitted[root_id] = admitted
+        return JSON::Any.new({"rootId" => root["rootId"], "codeVersion" => JSON::Any.new(admitted.to_i64)})
+      end
+      root
     end
 
     private def on_control(frame : Frame) : Nil
@@ -913,7 +939,7 @@ module LLM::Chord
       end
       controller = AbortController.new
       @incoming[id] = controller
-      root = @peer.kind.host? ? frame["root"]? : nil
+      root = @peer.kind.host? ? admit_root(frame["root"]?) : nil
       spawn { run_call(id, frame, served, root, controller) }
     end
 
