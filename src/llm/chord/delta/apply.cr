@@ -62,8 +62,7 @@ module LLM::Chord::Delta
       write!(parent, key, JSON::Any.new(current.as_s + op.text))
     when Op::Truncate
       current = read!(parent, key).as_s
-      count = Math.min(op.count, current.size)
-      write!(parent, key, JSON::Any.new(current[count, current.size - count]))
+      write!(parent, key, JSON::Any.new(Utf16.slice(current, op.count)))
     end
   end
 

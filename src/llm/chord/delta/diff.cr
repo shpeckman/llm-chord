@@ -68,9 +68,10 @@ module LLM::Chord::Delta
         emit(Op::Set.new(path, JSON::Any.new(after)))
         return
       end
-      emit(Op::Truncate.new(path, before.size - shared))
-      if after.size > shared
-        emit(Op::Append.new(path, after[shared, after.size - shared]))
+      shared_chars = Utf16.chars_for_units(after, shared)
+      emit(Op::Truncate.new(path, Utf16.size(before) - shared))
+      if after.size > shared_chars
+        emit(Op::Append.new(path, after[shared_chars, after.size - shared_chars]))
       end
     end
 
