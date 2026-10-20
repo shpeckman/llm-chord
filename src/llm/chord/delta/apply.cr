@@ -69,7 +69,12 @@ module LLM::Chord::Delta
   end
 
   private def self.container_id(value : JSON::Any) : UInt64
-    value.raw.object_id
+    raw = value.raw
+    if raw.is_a?(Array)
+      raw.object_id
+    else
+      raw.as(Hash).object_id
+    end
   end
 
   private def self.shallow_copy(value : JSON::Any) : JSON::Any
