@@ -42,7 +42,7 @@ module LLM::Chord
     end
   end
 
-  record ListenerDecl, origin : AnyResource | Subscribable, source : Proc(Subscribable), fn : ListenerFn
+  record ListenerDecl, origin : AnyResource | Subscribable, source : Proc(Subscribable), select : (Proc(AnyResource, Subscribable))?, fn : ListenerFn
 
   class Decls
     getter cells = {} of String => Cell
@@ -68,6 +68,13 @@ module LLM::Chord
   end
 
   record Installed, code_version : Int32, service : Service, implementation : Implementation, decls : Decls
+
+  record Gate, grandfathered : ::Set(String), queue : Array(Tuple(String, JSON::Any)), drained : Proc(Nil)
+
+  record StagedListeners, activate : Proc(Nil), discard : Proc(Nil)
+
+  private record Subscription, origin : AnyResource | Subscribable, select : (Proc(AnyResource, Subscribable))?,
+    unsubscribe : Proc(Nil), buffer : Array(JSON::Any)?
 
   enum ObjectStatus
     Activating
