@@ -153,9 +153,9 @@ module LLM::Chord::Delta
 
     def string?(key : String) : String?
       raw = @value.raw
-      return nil unless raw.is_a?(Hash)
+      return unless raw.is_a?(Hash)
       child = raw[key]?
-      return nil if child.nil?
+      return if child.nil?
       child.raw.as?(String)
     end
 
