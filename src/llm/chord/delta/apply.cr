@@ -21,12 +21,12 @@ module LLM::Chord::Delta
     ops.each do |op|
       case op
       when Op::Replace
-        current = op.value
+        current = Json.deep_copy(op.value)
       when Op::Splice
         array = resolve_container(current, op.path)
         raw = array.raw
         raise PathError.new(op.path) unless raw.is_a?(Array)
-        raw[op.index, op.remove] = op.items
+        raw[op.index, op.remove] = op.items.map { |item| Json.deep_copy(item) }
       when Op::Move
         array = resolve_container(current, op.path)
         raw = array.raw
@@ -54,7 +54,7 @@ module LLM::Chord::Delta
     key = path[-1]
     case op
     when Op::Set
-      write!(parent, key, op.value)
+      write!(parent, key, Json.deep_copy(op.value))
     when Op::Delete
       delete!(parent, key)
     when Op::Append
@@ -62,7 +62,8 @@ module LLM::Chord::Delta
       write!(parent, key, JSON::Any.new(current.as_s + op.text))
     when Op::Truncate
       current = read!(parent, key).as_s
-      write!(parent, key, JSON::Any.new(current[op.count, current.size - op.count]))
+      count = Math.min(op.count, current.size)
+      write!(parent, key, JSON::Any.new(current[count, current.size - count]))
     end
   end
 

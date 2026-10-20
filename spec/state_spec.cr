@@ -130,6 +130,48 @@ describe LLM::Chord do
       state.change { |draft| draft["n"] = 2 }
       sequences.should eq [0, 1, 2]
     end
+
+    it "rejects a reentrant change" do
+      state = LLM::Chord.replicated_state(JSON.parse(%({"n":0})))
+      expect_raises(Exception) do
+        state.change do |_draft|
+          state.change { |inner| inner["n"] = 1 }
+        end
+      end
+    end
+
+    it "rejects a reentrant replace" do
+      state = LLM::Chord.replicated_state(JSON.parse(%({"n":0})))
+      expect_raises(Exception) do
+        state.change do |_draft|
+          state.replace(JSON.parse(%({"n":1})))
+        end
+      end
+    end
+
+    it "aborts a change whose mutator raises" do
+      state = LLM::Chord.replicated_state(JSON.parse(%({"n":0})))
+      deliveries = [] of LLM::Chord::Delivery
+      state.subscribe { |_value, delivery| deliveries << delivery }
+      expect_raises(Exception) do
+        state.change do |draft|
+          draft["n"] = 1
+          raise "boom"
+        end
+      end
+      state.value.should eq JSON.parse(%({"n":0}))
+      deliveries.size.should eq 1
+    end
+
+    it "routes listener errors to on_error" do
+      errors = [] of Exception
+      state = LLM::Chord.replicated_state(JSON.parse(%({"n":0})), ->(ex : Exception) { errors << ex })
+      state.subscribe do |_value, _delivery|
+        raise "boom"
+      end
+      errors.size.should eq 1
+      errors[0].message.should eq "boom"
+    end
   end
 
   describe ".replicated_state (source)" do
@@ -156,6 +198,19 @@ describe LLM::Chord do
       end
       attachment.emit(12_i64, JSON.parse(%({"n":1})))
       errors.size.should eq 1
+    end
+
+    it "disposes idempotently and ignores frames after dispose" do
+      snapshot = LLM::Chord::Snapshot.new(JSON.parse(%({"n":0})), 10_i64)
+      attachment = FakeAttachment.new(snapshot)
+      state = LLM::Chord.replicated_state(FakeSource.new(attachment))
+      values = [] of JSON::Any
+      state.subscribe { |value, _delivery| values << value }
+      state.dispose
+      state.dispose
+      attachment.disposed.should be_true
+      attachment.emit(11_i64, JSON.parse(%({"n":1})))
+      values.size.should eq 1
     end
   end
 end
