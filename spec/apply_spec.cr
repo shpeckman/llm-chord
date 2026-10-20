@@ -83,6 +83,11 @@ describe LLM::Chord::Delta do
       apply(base, [Op::Truncate.new(path("s"), 5)]).should eq JSON.parse(%({"s":""}))
     end
 
+    it "truncates by UTF-16 code units" do
+      base = JSON.parse(%({"s":"😀x"}))
+      apply(base, [Op::Truncate.new(path("s"), 2)]).should eq JSON.parse(%({"s":"x"}))
+    end
+
     it "rejects a move with a mismatched permutation" do
       base = JSON.parse(%([0,1,2]))
       expect_raises(PathError) { apply(base, [Op::Move.new([] of Seg, [1, 0])]) }

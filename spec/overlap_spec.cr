@@ -34,4 +34,8 @@ describe "LLM::Chord::Delta.overlap" do
   it "honors an explicit probe length" do
     LLM::Chord::Delta.overlap("abcd", "bcdx", 65_536, probe: 2).should eq 3
   end
+
+  it "returns a UTF-16 code unit count for astral characters" do
+    LLM::Chord::Delta.overlap("a😀", "😀b", 65_536).should eq 2
+  end
 end

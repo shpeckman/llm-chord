@@ -63,5 +63,13 @@ describe LLM::Chord::Delta do
       ops.first.should be_a(Op::Append)
       ops.first.as(Op::Append).text.should eq "def"
     end
+
+    it "round-trips a truncate of an astral prefix" do
+      round_trip(%({"s":"😀x"}), %({"s":"x"}))
+    end
+
+    it "round-trips an append after an astral character" do
+      round_trip(%({"s":"a😀"}), %({"s":"a😀b"}))
+    end
   end
 end
