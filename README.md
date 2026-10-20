@@ -104,6 +104,14 @@ unsub.call
 `replicated_state(source)` attaches a publication-only view to an external
 authoritative stream (`ReplicatedStateSource`).
 
+Pass `async: true` to deliver to each subscriber on its own fiber instead of
+synchronously; listeners then never block the publishing fiber (per-subscriber
+backpressure is a bounded 100-frame channel):
+
+```crystal
+state = LLM::Chord.replicated_state(JSON.parse(%({"n":0})), async: true)
+```
+
 ## Operations
 
 | Verb | Struct          | Meaning                                      |
