@@ -6,8 +6,12 @@ authors:
   - shpeckman
 
 description: |
-  Transactional JSON revision tracking and operation batches, ported from
-  @earendil-works/chord/delta.
+  Typed host runtime for plugins, contracts, replicated state, and RPC over
+  JSON links, ported from @earendil-works/chord.
+
+dependencies:
+  typebox:
+    path: ../typebox
 
 crystal: ">= 1.21.0"
 

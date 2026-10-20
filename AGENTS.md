@@ -4,11 +4,15 @@
 
 `llm-chord` is a Crystal port of
 [`@earendil-works/chord`](https://github.com/earendil-works/pi/tree/main/packages/chord).
-It is being ported in phases tracked in `ROADMAP.md`. Phases 1 and 2 are
-done: the delta module, replicated state, Context (values, cancellation,
-telemetry), the telemetry contracts and in-memory recorder, errors, and output
-follow upstream semantics. Contracts, objects, hosts, links, reload, and SQLite
-are not ported yet. The shard has no dependencies; values are `JSON::Any`.
+It is being ported in phases tracked in `ROADMAP.md`. Phases 1–3 are done:
+the delta module, replicated state, Context (values, cancellation,
+telemetry), the telemetry contracts and in-memory recorder, errors, output,
+schemas, and contracts follow upstream semantics. Objects, hosts, links,
+reload, and SQLite are not ported yet. Values are `JSON::Any`.
+
+The one dependency is the `typebox` shard (`path: ../typebox`), a port of
+TypeBox 1.3.27's builders and `Value` functions. Schema behavior belongs
+there; llm-chord only uses it.
 
 Upstream is the specification. When behavior is in doubt, read the upstream
 source and tests (`packages/chord/src`, `packages/chord/test`) and match them.
@@ -33,9 +37,11 @@ src/llm/chord/delta/codec.cr       Encoder/Decoder (path interning + arity omiss
 src/llm/chord/delta/draft.cr       Draft: revocable copy-on-write handles
 src/llm/chord/delta/tracker.cr     Overlay, Change, Prepared, Tracker, track
 src/llm/chord/state.cr             replicated_state: publisher, subscribers, mutable and attached state
+src/llm/chord/schema.cr            canonical_json, hash64, normalize, canonical_identity, assert_valid, fits?
+src/llm/chord/contract.cr          method/opaque, placement, remote/local, Description, coverage, bind
 spec/                              Crystal specs, largely translated from upstream tests
 bench/                             Release-mode micro-benchmarks
-ROADMAP.md                         Porting phases and open decisions
+ROADMAP.md                         Porting phases and settled design decisions
 .ameba.yml                         Ameba linter config
 ```
 
@@ -112,3 +118,14 @@ The specs never hit the network.
   re-run something similar when changing `diff.cr` or the tracker. Phase 2 did
   the same for `Output.bound`, `sanitize`, and `Buffer` snapshots, including
   byte chunks with invalid UTF-8, BOMs, and skips.
+- Phase 3 ran upstream's `src/contract.ts` and `src/schema.ts` directly under
+  `node --experimental-strip-types` (with `typebox` linked into the package's
+  `node_modules`) on generated contracts, and compared descriptions,
+  fingerprints, `hash64`, normalized inputs and identities, `coverage`, and
+  `fits`. Re-run it when changing `schema.cr`, `contract.cr`, or the typebox
+  shard.
+- Contracts keep descriptions as raw JSON (`Description#json`) so a received
+  token fingerprints exactly as sent; typed accessors read from it. Build
+  descriptions only in `remote` / `local`, in upstream's key order.
+- `bind` is generic over the adapter type (`Hash(Int32, A)`), so Phase 4
+  decides what an adapter is without touching contracts.

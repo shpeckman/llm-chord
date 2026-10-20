@@ -34,6 +34,8 @@ fingerprints therefore needs the same JSON Schema data, not TypeBox itself.
   nullable, record, defaults), stored as JSON so canonical output and
   fingerprints fall out directly. `canonical_json` and `hash64` (two FNV-1a
   lanes over UTF-16 code units) are ported verbatim.
+- Implemented as the separate `typebox` shard (a port of TypeBox 1.3.27's
+  builders and `Value` functions), which llm-chord depends on.
 - The runtime operations chord uses, for the subset the builder emits:
   validation with error paths (`Value.Check` / `Value.Errors`), defaults
   (`Value.Default`), and stripping unknown fields (`Value.Clean`).
@@ -99,13 +101,20 @@ the host manager.
   type-level only). pi-telemetry's adapter conformance suite can come with
   Phase 8, where the SQLite recorder needs it.
 
-## Phase 3 — schemas and contracts
+## Phase 3 — schemas and contracts ✅
 
-- The schema DSL from decision 2, with `canonical_json`, `hash64`, validation,
-  defaults, and clean, verified against TypeBox.
+- The schema DSL from decision 2 as the `typebox` shard: builders, `Check`,
+  `Errors` (with en_US messages), `Default`, `Clean`, `Clone`, verified against
+  TypeBox 1.3.27 on generated schemas and values.
+- `LLM::Chord::Schema`: `canonical_json`, `hash64`, `deep_equal?`,
+  `assert_valid`, `normalize`, `canonical_identity`, `fits?`.
 - `local`, `remote`, `method`, `opaque`, `bind`, `coverage`; `host_named` /
-  `host_family` placement; variants, versions, the compatibility rule;
-  canonical input identity; fingerprints.
+  `host_family` placement with `resolve_host` / `placed_on?`; variants,
+  versions, the compatibility rule; canonical input identity; fingerprints;
+  `contract_from_description` and `DESCRIPTION_SCHEMA` for tokens.
+- Verified against upstream chord under Node on generated contracts:
+  descriptions, fingerprints, `hash64`, normalization and identities,
+  `coverage` (every outcome), and `fits` in both directions.
 
 ## Phase 4 — single-process runtime
 
