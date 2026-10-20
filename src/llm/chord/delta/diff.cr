@@ -140,6 +140,17 @@ module LLM::Chord::Delta
           return
         end
       end
+      if subsequence = subsequence_matches(before, after, before_start, before_end, after_start, after_end)
+        unless subsequence.empty?
+          process_array_matches(before, after, path, before_start, before_end, after_start, after_end, output_start, subsequence)
+          return
+        end
+      end
+      anchors = identity_anchors(before, after, before_start, before_end, after_start, after_end)
+      unless anchors.empty?
+        process_array_matches(before, after, path, before_start, before_end, after_start, after_end, output_start, anchors)
+        return
+      end
       if matches = lcs_matches(before[before_start...before_end], after[after_start...after_end])
         unless matches.empty?
           absolute = matches.map { |(before_index, after_index)| {before_start + before_index, after_start + after_index} }
