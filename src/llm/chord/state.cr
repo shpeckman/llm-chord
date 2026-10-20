@@ -15,14 +15,6 @@ module LLM::Chord
   alias StateListener = Proc(JSON::Any, Context, Delivery, Nil)
   alias ErrorReporter = Proc(Exception, Nil)
 
-  class AggregateError < Exception
-    getter errors : Array(Exception)
-
-    def initialize(@errors : Array(Exception), message : String)
-      super(message)
-    end
-  end
-
   REPORT_ASYNC           = ErrorReporter.new { |error| spawn { raise error } }
   MAX_PENDING_DELIVERIES =                       100
   MAX_SAFE_CURSOR        = 9_007_199_254_740_991_i64

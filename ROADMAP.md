@@ -38,17 +38,24 @@ These shape everything from Phase 3 on and should be settled before it starts.
   reporting, newest-wins overflow, async subscriptions, attached sources with
   cursor validation and aggregate disposal errors.
 
-## Phase 2 — standalone modules
+## Phase 2 — standalone modules ✅
 
-- **Context, complete:** cancellation (`with_cancel`, `with_abort_signal`,
-  `without_abort_signal`, `await_with_context`) built on fibers and channels;
-  telemetry spans (`with_telemetry`, `trace_in`), which needs a minimal port of
-  `@earendil-works/pi-telemetry`'s span interface and no-op span.
-- **Errors:** `ChordError` with upstream's codes and reasons.
-- **Output:** `OutputBuffer`, `bound_output`, `sanitize_output`,
-  `utf8_byte_length`, `Progress`.
-- **JSON:** `JsonRevisionValidator` (incremental validation that skips
-  containers already validated).
+- **Context, complete:** `AbortSignal` / `AbortController`, `with_abort_signal`,
+  `without_abort_signal`, `with_cancel`, `await` (channel or block), telemetry
+  (`telemetry`, `with_telemetry`, `trace_in`).
+- **Telemetry:** the pi-telemetry subset chord uses — span, context, metrics,
+  propagation, and store contracts; the no-op context; the
+  `InMemoryTelemetryContext` reference recorder with `TelemetryStore` queries;
+  `render_trace`.
+- **Errors:** `ChordError` with upstream's codes and reasons, `chord_error?`,
+  `forbidden`, `invalid`, `as_chord_error`, `run_all`.
+- **Output:** `bound`, `sanitize`, `Buffer` with a WHATWG UTF-8 stream decoder
+  and skips, `Progress` with an injectable clock. Verified against upstream on
+  generated cases.
+- Not ported, on purpose: chord's `JsonRevisionValidator` (neither exported
+  nor used upstream) and pi-telemetry's typed schema helpers (TypeScript
+  type-level only). pi-telemetry's adapter conformance suite can come with
+  Phase 8, where the SQLite recorder needs it.
 
 ## Phase 3 — schemas and contracts
 
