@@ -170,7 +170,7 @@ describe LLM::Chord::Delta do
       base = JSON.parse(%({"a":{"x":1},"b":{"y":2}}))
       result = LLM::Chord::Delta.apply_immutable_shared(base, [Op::Set.new(path("a", "x"), JSON::Any.new(9_i64))])
       result["a"]["x"].as_i.should eq 9_i64
-      result["b"].raw.object_id.should eq base["b"].raw.object_id
+      result["b"].as_h.object_id.should eq base["b"].as_h.object_id
       base["a"]["x"].as_i.should eq 1_i64
     end
 
