@@ -4,15 +4,14 @@ module LLM::Chord
     Closed
     Opening
     Open
-    Unavailable
   end
 
   alias ResourceDep = Ref | AnyResource
 
   abstract class AnyResource
     getter key : String
-    property version : Int32
-    property? exclusive : Bool
+    getter version : Int32
+    getter? exclusive : Bool
     getter deps : Array(ResourceDep)
     getter state = ResourceState::Closed
 
@@ -37,14 +36,8 @@ module LLM::Chord
     end
 
     def open_value : T
-      raise ChordError.new(ErrorCode::Unavailable, "resource #{key} could not be restored") if @state.unavailable?
       raise Chord.not_ready("resource #{key}") unless @state.open?
       @value.as(T)
-    end
-
-    def mark_unavailable : Nil
-      @state = ResourceState::Unavailable
-      @value = nil
     end
 
     def open(signal : AbortSignal, order : Array(AnyResource)) : Nil
@@ -64,13 +57,6 @@ module LLM::Chord
       @value = opened
       @state = ResourceState::Open
       order << self
-    end
-
-    def adopt(version : Int32, exclusive : Bool, opener : Proc(AbortSignal, T), closer : Proc(T, Nil)?) : Nil
-      @version = version
-      @exclusive = exclusive
-      @opener = opener
-      @closer = closer
     end
 
     def close(order : Array(AnyResource)) : Nil
