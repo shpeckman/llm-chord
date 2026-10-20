@@ -41,7 +41,6 @@ module LLM::Chord
     getter principal : JSON::Any
     getter ready_timeout : Time::Span?
     getter kind : PeerKind
-    getter code_version = 1
     getter connections = ::Set(Connection).new
     getter upstream : Connection? = nil
     protected property in_factory = 0
@@ -51,20 +50,32 @@ module LLM::Chord
     @facets = {} of String => Facet
     @facet_runs = {} of String => AbortController
     @host_objects = {} of String => Ref
-    @services = {} of String => Service
-    @tables = {} of String => RegistryTable
+    @code_versions = {} of Int32 => CodeVersionState
+    @current : CodeVersionState
+    @previous : CodeVersionState? = nil
+    @pending : CodeVersionState? = nil
+    @gating : ::Set(String)? = nil
+    @reloading = false
+    @remote_modules = {} of String => Array(String)
+    @remote_removed = {} of String => Array(String)
+    @failed : Exception? = nil
     @order = {} of String => Hash(String, Int32)
     @subscribers = {} of String => Listeners(TableListener)
     @bindings = {} of String => RemoteBinding
     @lingering = {} of String => RemoteBinding
     @routes = {} of String => Route
-    @roots = {} of String => Int32
     @local = ::Set(String).new
     @foreign = {} of String => ::Set(Connection)
     @root_links = {} of String => ::Set(Connection)
+    @touches = {} of String => ::Set(ObjectImpl)
+    @retirement_watchers = ::Set(Proc(Nil)).new
+    @deferred_hellos = {} of Connection => Int32
+    @reload_waiters = [] of Proc(Nil)
+    @child_reloads : ChildReloads
     @retire_allowed = 0
     @origin_seq = 0
     @root_seq = 0_i64
+    @code_version_seq = 1
     @incarnation : String = Random.new.hex(3)
     @principal_key : Proc(JSON::Any, String)
     @self_key : String
@@ -82,11 +93,46 @@ module LLM::Chord
       @on_error = Host.reporter(on_error)
       @linger_types = linger || {} of String => Time::Span
       @linger_cap = linger_cap
+      @current = CodeVersionState.new(1, {} of String => Service, {} of String => RegistryTable,
+        {} of String => Int32, AbortController.new)
+      @code_versions[1] = @current
+      @child_reloads = ChildReloads.new(self)
       upstream.try { |link| connect(link.link, principal: link.principal, options: link.options) }
     end
 
+    def code_version : Int32
+      @current.id
+    end
+
     def previous_code_version : Int32?
-      nil
+      @previous.try(&.id)
+    end
+
+    protected def has_code_version?(code_version : Int32) : Bool
+      @code_versions.has_key?(code_version)
+    end
+
+    protected def retained_code_versions : Array(Tuple(Int32, Hash(String, Service)))
+      result = [] of Tuple(Int32, Hash(String, Service))
+      @code_versions.each { |(id, state)| result << {id, state.services} }
+      result << {@pending.id, @pending.services} if @pending
+      result
+    end
+
+    protected def pending_code_version : Int32?
+      @pending.try(&.id)
+    end
+
+    protected def next_code_version_id(given : Int32? = nil) : Int32
+      if given && given <= @current.id
+        raise ArgumentError.new("code version #{given} is not newer than #{@current.id}")
+      end
+      @code_version_seq = given || @code_version_seq + 1
+      @code_version_seq
+    end
+
+    protected def peek_next_code_version : Int32
+      @code_version_seq + 1
     end
 
     def serve(contract : Contract, *, lifetime : Lifetime = Lifetime::Referenced, linger : Time::Span? = nil,
