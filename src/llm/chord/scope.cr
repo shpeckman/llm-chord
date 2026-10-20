@@ -92,11 +92,19 @@ module LLM::Chord
       raise Chord.invalid("duplicate", "#{@object.type_name}: duplicate #{kind} name #{name}") if map.has_key?(name)
     end
 
-    private def declare_cell(name : String, schema : TypeBox::Schema, initial : JSON::Any?, init : InitFn?) : Cell
+    private def declare_cell(name : String, schema : TypeBox::Schema, initial : JSON::Any?, init : InitFn?,
+                             version : Int32, migrate : Proc(JSON::Any, Int32, JSON::Any)?) : Cell
       unique(@run.decls.cells, "state", name)
-      cell = Cell.new(name, schema, initial, @object.guard, @object.host.source_options)
-      @run.inits << {cell, init} if init
+      raise ArgumentError.new("state #{name}: version must be a positive integer") unless version >= 1
+      cell = @previous.try(&.cells[name]?)
+      unless cell
+        cell = Cell.new(name, schema, initial, @object.guard, @object.host.source_options)
+        @run.inits << {cell, init} if init
+      end
       @run.decls.cells[name] = cell
+      @run.decls.cell_schemas[name] = schema
+      @run.decls.cell_versions[name] = version
+      @run.decls.cell_migrations[name] = migrate if migrate
       cell
     end
 
@@ -105,10 +113,19 @@ module LLM::Chord
       unique(@run.decls.resources, "resource", name)
       resolved = [] of ResourceDep
       deps.try &.each { |dep| resolved << dep.as(ResourceDep) }
-      resource = Resource(T).new(name, version, exclusive, resolved, @object.host, opener, closer)
-      @run.created_resources << resource
-      @run.decls.resources[name] = resource
-      resource
+      existing = @previous.try(&.resources[name]?)
+      if existing && existing.version == version && existing.exclusive? == exclusive &&
+         existing.deps.size == resolved.size && existing.deps.zip(resolved).all? { |(a, b)| a.same?(b) }
+        kept = existing.as(Resource(T))
+        @run.decls.resources[name] = kept
+        @run.decls.adopted[kept] = -> { kept.adopt(version, exclusive, opener, closer); nil }
+        kept
+      else
+        resource = Resource(T).new(name, version, exclusive, resolved, @object.host, opener, closer)
+        @run.created_resources << resource
+        @run.decls.resources[name] = resource
+        resource
+      end
     end
 
     private def declare_derived(sources : Array(Readable), fn : Proc(Array(JSON::Any), JSON::Any)) : Derived
