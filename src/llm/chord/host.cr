@@ -28,8 +28,17 @@ module LLM::Chord
 
   alias PluginRef = Facet | String
 
-  record CodeVersionState, id : Int32, services : Hash(String, Service), tables : Hash(String, RegistryTable),
-    roots : Hash(String, Int32), abort : AbortController
+  class CodeVersionState
+    getter id : Int32
+    getter services : Hash(String, Service)
+    property tables : Hash(String, RegistryTable)
+    getter roots : Hash(String, Int32)
+    getter abort : AbortController
+
+    def initialize(@id : Int32, @services : Hash(String, Service), @tables : Hash(String, RegistryTable),
+                   @roots : Hash(String, Int32), @abort : AbortController)
+    end
+  end
 
   def self.upstream(link : Link, *, principal, **options) : Upstream
     Upstream.new(link, json_value(principal), LinkOptions.new(**options))
@@ -73,7 +82,6 @@ module LLM::Chord
     @retirement_watchers = ::Set(Proc(Nil)).new
     @deferred_hellos = {} of Connection => Int32
     @reload_waiters = [] of Proc(Nil)
-    @child_reloads : ChildReloads
     @retire_allowed = 0
     @origin_seq = 0
     @root_seq = 0_i64
