@@ -132,6 +132,7 @@ module LLM::Chord::Delta
         when "#"
           raise ArgumentError.new("# shape") unless arr.size == 3
           id = int(arr[1])
+          raise ArgumentError.new("bad path id") if id < 0
           path = parse_path(arr[2])
           LLM::Chord::Delta.assert_safe_path(path)
           @paths[id] = path
@@ -160,6 +161,7 @@ module LLM::Chord::Delta
         ref = arr[1]
         if ref.raw.is_a?(Int64)
           id = ref.raw.as(Int64).to_i32
+          raise ArgumentError.new("bad path id") if id < 0
           resolved = @paths[id]?
           raise PathError.new(id.to_i64) if resolved.nil?
           path = resolved
