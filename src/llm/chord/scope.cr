@@ -3,14 +3,16 @@ module LLM::Chord
   class ObjectScope
     protected getter run = Run.new
 
-    def initialize(@object : ObjectImpl); end
+    def initialize(@object : ObjectImpl, @previous : Decls? = nil); end
 
-    def state(name : String, schema : TypeBox::Schema, initial) : Cell
-      declare_cell(name, schema, Chord.json_value(initial), nil)
+    def state(name : String, schema : TypeBox::Schema, initial, version : Int32 = 1,
+              migrate : Proc(JSON::Any, Int32, JSON::Any)? = nil) : Cell
+      declare_cell(name, schema, Chord.json_value(initial), nil, version, migrate)
     end
 
-    def state(name : String, schema : TypeBox::Schema, &init : Ctx -> T) : Cell forall T
-      declare_cell(name, schema, nil, ObjectScope.init_fn(init))
+    def state(name : String, schema : TypeBox::Schema, version : Int32 = 1,
+              migrate : Proc(JSON::Any, Int32, JSON::Any)? = nil, &init : Ctx -> T) : Cell forall T
+      declare_cell(name, schema, nil, ObjectScope.init_fn(init), version, migrate)
     end
 
     def get(type : Contract, input = nil, principal = nil, state : Bool = true) : Ref

@@ -46,8 +46,12 @@ module LLM::Chord
 
   class Decls
     getter cells = {} of String => Cell
+    getter cell_schemas = {} of String => TypeBox::Schema
+    getter cell_versions = {} of String => Int32
+    getter cell_migrations = {} of String => Proc(JSON::Any, Int32, JSON::Any)
     getter refs = {} of String => Ref
     getter resources = {} of String => AnyResource
+    getter adopted = {} of AnyResource => Proc(Nil)
     getter listeners = {} of String => ListenerDecl
     getter tasks = {} of String => TaskFn
     getter derives = {} of String => Derived
