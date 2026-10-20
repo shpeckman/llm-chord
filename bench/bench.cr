@@ -32,7 +32,7 @@ Benchmark.bm do |bm|
 
   bm.report("immutable replay") do
     base = JSON.parse(%({"n":0}))
-    ops = [Op::Set.new(["n"], JSON::Any.new(1_i64))]
+    ops = [Op::Set.new(["n"] of Seg, JSON::Any.new(1_i64))]
     N.times { LLM::Chord::Delta.apply_immutable(base, ops) }
   end
 
