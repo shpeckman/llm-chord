@@ -111,9 +111,9 @@ module LLM::Chord
   end
 
   private class Publisher
-    def initialize(@value : JSON::Any, @on_error : Proc(Exception, Nil))
+    def initialize(@value : JSON::Any, @on_error : Proc(Exception, Nil), @async : Bool = false)
       @sequence = 0
-      @subscribers = [] of Subscriber
+      @subscribers = [] of (Subscriber | AsyncSubscriber)
       @publications = Deque(Publication).new
       @delivering = false
     end
@@ -123,7 +123,7 @@ module LLM::Chord
     end
 
     def subscribe(listener : StateListener) : Proc(Nil)
-      subscriber = Subscriber.new(listener, @sequence, @on_error)
+      subscriber = @async ? AsyncSubscriber.new(listener, @sequence, @on_error) : Subscriber.new(listener, @sequence, @on_error)
       @subscribers << subscriber
       subscriber.push(Frame.new(@value, Delivery.new(DeliveryKind::Hydrate, @sequence)))
       subscriber.drain
