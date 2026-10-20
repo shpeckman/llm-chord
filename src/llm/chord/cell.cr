@@ -255,8 +255,8 @@ module LLM::Chord
       @fn.call(@sources.map { |source| yield source })
     end
 
-    protected def attach : Nil
-      @value = compute(&.value)
+    protected def attach(precomputed : Hash(Readable, JSON::Any)? = nil) : Nil
+      @value = precomputed.try(&.[self]?) || compute(&.value)
       @sources.each do |source|
         if source.is_a?(Source)
           source.dependents << self
