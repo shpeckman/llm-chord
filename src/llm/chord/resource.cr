@@ -4,6 +4,7 @@ module LLM::Chord
     Closed
     Opening
     Open
+    Unavailable
   end
 
   alias ResourceDep = Ref | AnyResource
@@ -36,8 +37,14 @@ module LLM::Chord
     end
 
     def open_value : T
+      raise ChordError.new(ErrorCode::Unavailable, "resource #{key} could not be restored") if @state.unavailable?
       raise Chord.not_ready("resource #{key}") unless @state.open?
       @value.as(T)
+    end
+
+    def mark_unavailable : Nil
+      @state = ResourceState::Unavailable
+      @value = nil
     end
 
     def open(signal : AbortSignal, order : Array(AnyResource)) : Nil
