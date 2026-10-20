@@ -71,5 +71,21 @@ describe LLM::Chord::Delta do
     it "round-trips an append after an astral character" do
       round_trip(%({"s":"a😀"}), %({"s":"a😀b"}))
     end
+
+    it "round-trips arrays with repeated values" do
+      b = JSON.parse(%([1,2,1,2,1]))
+      a = JSON.parse(%([2,1,2,1,2]))
+      apply_immutable(b, diff_revisions(b, a)).should eq a
+    end
+
+    it "round-trips a large array with a removed subsequence" do
+      before = Array(JSON::Any).new(1000) { |i| JSON::Any.new(i.to_i64) }
+      after = before.reject { |v| (v.as_i % 3).zero? }
+      b = JSON::Any.new(before)
+      a = JSON::Any.new(after)
+      ops = diff_revisions(b, a)
+      ops.size.should be > 1
+      apply_immutable(b, ops).should eq a
+    end
   end
 end
