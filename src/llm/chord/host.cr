@@ -132,7 +132,9 @@ module LLM::Chord
     protected def retained_code_versions : Array(Tuple(Int32, Hash(String, Service)))
       result = [] of Tuple(Int32, Hash(String, Service))
       @code_versions.each { |(id, state)| result << {id, state.services} }
-      result << {@pending.id, @pending.services} if @pending
+      if pending = @pending
+        result << {pending.id, pending.services}
+      end
       result
     end
 
