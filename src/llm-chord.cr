@@ -1,6 +1,11 @@
 # src/llm-chord.cr
 require "./llm/chord/json"
+require "./llm/chord/errors"
+require "./llm/chord/telemetry"
+require "./llm/chord/telemetry/memory"
+require "./llm/chord/telemetry/render"
 require "./llm/chord/context"
+require "./llm/chord/output"
 require "./llm/chord/delta/types"
 require "./llm/chord/delta/utf16"
 require "./llm/chord/delta/overlap"

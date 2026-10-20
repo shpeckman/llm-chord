@@ -4,10 +4,11 @@
 
 `llm-chord` is a Crystal port of
 [`@earendil-works/chord`](https://github.com/earendil-works/pi/tree/main/packages/chord).
-It is being ported in phases tracked in `ROADMAP.md`. Phase 1 is done: the delta module, Context
-values, and replicated state now follow upstream semantics. Contracts,
-objects, hosts, links, reload, output, SQLite, and telemetry are not ported
-yet. The shard has no dependencies; values are `JSON::Any`.
+It is being ported in phases tracked in `ROADMAP.md`. Phases 1 and 2 are
+done: the delta module, replicated state, Context (values, cancellation,
+telemetry), the telemetry contracts and in-memory recorder, errors, and output
+follow upstream semantics. Contracts, objects, hosts, links, reload, and SQLite
+are not ported yet. The shard has no dependencies; values are `JSON::Any`.
 
 Upstream is the specification. When behavior is in doubt, read the upstream
 source and tests (`packages/chord/src`, `packages/chord/test`) and match them.
@@ -17,7 +18,12 @@ source and tests (`packages/chord/src`, `packages/chord/test`) and match them.
 ```
 src/llm-chord.cr                   Entry point: requires the tree, opens LLM::Chord
 src/llm/chord/json.cr              deep_copy, copy_json, identical?, equal?, to_any, js_string
-src/llm/chord/context.cr           Context, ContextKey(T), BACKGROUND/TODO, with_value
+src/llm/chord/errors.cr            ChordError, ErrorCode, AggregateError, helpers
+src/llm/chord/telemetry.cr         Telemetry contracts, store types, no-op implementations
+src/llm/chord/telemetry/memory.cr  InMemoryTelemetryContext (recorder, propagation, metrics, store)
+src/llm/chord/telemetry/render.cr  render_trace
+src/llm/chord/context.cr           Context, ContextKey(T), AbortSignal/AbortController, await, telemetry
+src/llm/chord/output.cr            bound, sanitize, Buffer (streaming UTF-8 decoder), Progress, clocks
 src/llm/chord/delta/types.cr       Seg/Path/WireOp, Op hierarchy, from_tuple/to_tuple, validation, errors
 src/llm/chord/delta/utf16.cr       UTF-16 code-unit counting and slicing
 src/llm/chord/delta/overlap.cr     String suffix/prefix overlap helper
@@ -87,6 +93,22 @@ The specs never hit the network.
   excluded. Async subscriptions shift the next frame before spawning, which is
   the equivalent of a JavaScript async listener starting synchronously.
   Listener errors are always reported, never raised into the publisher.
+- Telemetry lives in `LLM::Chord::Telemetry` and mirrors the subset of
+  `@earendil-works/pi-telemetry` (`packages/telemetry`) that chord uses. The
+  in-memory recorder resolves carriers by concrete type
+  (`Telemetry.carrier_of`), the analogue of upstream's module-level WeakMap, so
+  links work across recorders.
+- Upstream promises map to blocking calls on fibers. Work that upstream starts
+  without awaiting (an async listener, a progress `write`, `awaitWithContext`)
+  is spawned; results come back through channels.
+- Compiler quirk: a method that captures a block (`&block : ...`) and also
+  contains a proc literal (`-> { }`) can fail with "read before assignment" for
+  the block variable. Keep the proc literal in a separate private method, as
+  `AbortSignal#remover` and `SystemClock#disarmer` do.
+- `Output` counts bytes on UTF-8 strings; its byte decoder follows the WHATWG
+  UTF-8 decoder exactly, including how many U+FFFD an invalid sequence yields.
 - The differential harness used during Phase 1 generated cases with upstream's
   `diffRevisions` and `track` under Node and compared op batches and values;
-  re-run something similar when changing `diff.cr` or the tracker.
+  re-run something similar when changing `diff.cr` or the tracker. Phase 2 did
+  the same for `Output.bound`, `sanitize`, and `Buffer` snapshots, including
+  byte chunks with invalid UTF-8, BOMs, and skips.

@@ -8,11 +8,17 @@ The port currently covers chord's foundation layer:
   revision tracking, structural diff, immutable apply, and the wire codec.
 - `LLM::Chord.replicated_state` — chord's observable replicated state, either
   authoritative and mutable or attached to an external revision source.
-- `LLM::Chord::Context` — explicit invocation-scoped values (`ContextKey`,
-  `with_value`, `BACKGROUND`, `TODO`).
+- `LLM::Chord::Context` — `@earendil-works/chord/context`: explicit
+  invocation-scoped values, cancellation, and telemetry spans.
+- `LLM::Chord::Telemetry` — the parts of `@earendil-works/pi-telemetry` chord
+  uses: span, metrics, propagation, and store contracts, the no-op context, the
+  in-memory reference recorder, and `render_trace`.
+- `LLM::Chord::Output` — `@earendil-works/chord/output`: bounded output
+  streams and paced progress commits.
+- `LLM::Chord::ChordError` — chord's error codes and helpers.
 
-Contracts, objects, hosts, links, reload, output, SQLite, and telemetry are not
-ported yet; see [ROADMAP.md](ROADMAP.md). Values are Crystal's `JSON::Any`.
+Contracts, objects, hosts, links, reload, and SQLite are not ported yet; see
+[ROADMAP.md](ROADMAP.md). Values are Crystal's `JSON::Any`.
 
 ## Requirements
 
@@ -162,7 +168,102 @@ context = LLM::Chord::Context::BACKGROUND.with_value(request, "abc")
 context.value(request)  # => "abc"
 ```
 
-Contexts are immutable; `with_value` derives a child. Keys match by identity.
+Contexts are immutable; every `with_*` derives a child and never changes the
+parent. Keys match by identity. `Context::BACKGROUND` and `Context::TODO` are
+the empty roots.
+
+### Cancellation
+
+```crystal
+child, controller = context.with_cancel
+controller.abort("shutting down")          # or abort(an_exception)
+child.abort_signal.not_nil!.aborted?       # => true
+
+cleanup = child.without_abort_signal       # mandatory cleanup ignores caller cancellation
+linked = context.with_abort_signal(other_controller.signal)
+
+value = child.await(channel)               # receive, or raise the abort reason
+value = child.await { slow_work }          # runs on its own fiber; cancellation stops waiting only
+```
+
+An `AbortSignal` has `aborted?`, `reason` (an `Exception`; `AbortError` by
+default), `on_abort { |reason| }` (returns a remover), `throw_if_aborted`, and
+`AbortSignal.any(signals)`. A child signal aborts when its own controller or any
+ancestor aborts; siblings are unaffected.
+
+### Telemetry
+
+```crystal
+recorder = LLM::Chord::Telemetry::InMemoryTelemetryContext.new
+recorder.start_span(LLM::Chord::Telemetry::SpanOptions.new("app.request")) do |span|
+  context = LLM::Chord::Context::BACKGROUND.with_telemetry(span)
+  context.trace_in("app.load") do |child|
+    child.telemetry.add_event("cache.miss")
+    child.trace_in("app.read") { |nested| read_account(nested) }
+  end
+end
+```
+
+`context.telemetry` is the context's span, or `Telemetry::NOOP` when none was
+set. `trace_in(options)` (or `trace_in(name)`) runs the block in a child span
+and passes a derived context; the block's value and exceptions pass through.
+There is no ambient current span.
+
+## Telemetry
+
+`Telemetry::TelemetryContext` starts spans around a block
+(`start_span(options) { |span| }`); a `Telemetry::TelemetrySpan` is also the
+parent context for its children and records `add_event`, `add_link`,
+`merge_attributes`, and `status=`. Contexts may expose `metrics` (`counter`,
+`up_down_counter`, `histogram`) and `propagation` (`inject` / `extract` of a
+string `Carrier`).
+
+- `Telemetry::NOOP`, `NOOP_METRICS`, `NOOP_PROPAGATION` record nothing.
+- `Telemetry::InMemoryTelemetryContext` is the reference recorder. A raised
+  exception marks its span as an error unless a status was set; recording on a
+  settled span is ignored and its children are inert. `recorded_spans` and
+  `recorded_metrics` return detached snapshots, and it implements
+  `TelemetryStore` (`find_traces` with paging, `get_trace`, `find_metrics`).
+- `Telemetry.render_trace(spans)` renders stored spans as an indented forest.
+- `Telemetry.attributes(key: value, ...)` builds an `Attributes` hash.
+
+## Output
+
+```crystal
+limits = LLM::Chord::Output::Limits.tail(200, 64 * 1024)   # max_lines, max_bytes
+buffer = LLM::Chord::Output::Buffer.new(limits)
+buffer.push(bytes)              # String or Bytes; UTF-8 split across chunks is decoded
+buffer.end
+buffer.snapshot                 # => Bounded(text, dropped_bytes, dropped_lines)
+```
+
+- `Output.bound(text, limits)` keeps whole lines (head or tail) within both
+  limits; a single line longer than `max_bytes` is cut on a character
+  boundary. It returns an `Excerpt` (`text`, `bytes`, `dropped_bytes`,
+  `dropped_lines`).
+- `Output.sanitize(text)` removes control characters except tab and newline.
+- `Buffer` costs time proportional to each chunk, keeps exact totals for the
+  whole stream, decodes bytes like a WHATWG UTF-8 decoder (invalid sequences
+  become U+FFFD), drops a byte-order mark only at the very start, and accepts
+  `Skip` counts of omitted output for tail retention.
+- `Output::Progress.new(write, on_error, min_interval_ms, clock)` paces commits:
+  the first change after a pause commits at once; each commit then delays the
+  next by at least `min_interval_ms` and by its written size at 100 KiB/s.
+  `mark` schedules a commit, `mark_and_wait` returns a `Waiter` (`wait` raises
+  if the commit failed), and `stop` waits for the commit in flight and returns
+  the waiters no commit covered. `write` returns the bytes it wrote and runs on
+  its own fiber. `clock` defaults to `Output::SYSTEM_CLOCK`.
+
+## Errors
+
+`ChordError` carries a `code` (`ErrorCode`: `Aborted`, `ContractMismatch`,
+`Forbidden`, `Gone`, `Invalid`, `NotInVariant`, `NotReady`, `Released`,
+`Superseded`, `Unavailable`, `UpgradeConflict`, `UpgradeRequired`), an optional
+`reason`, `details`, and `cause`; its message is `code/reason: message`.
+`Superseded` and `UpgradeConflict` are `retryable?`. Helpers:
+`LLM::Chord.chord_error?`, `.forbidden`, `.invalid`, `.as_chord_error` (keeps a
+`ChordError`, wraps anything else as `unavailable`), and `.run_all` (runs every
+step, then raises the one error or an `AggregateError`).
 
 ## Replicated state
 
@@ -216,7 +317,20 @@ and reports to `on_error` (an `AggregateError` when disposal also fails).
 - `LLM::Chord::Json.deep_copy`, `.copy_json`, `.container?`, `.identical?`,
   `.equal?`, `.to_any`, `.to_struct`, `.from_struct`, `.valid?`, `.strict?`,
   `.validate!`, `.js_string`, `.number_text`
-- `LLM::Chord::Context` (`BACKGROUND`, `TODO`, `#value`, `#with_value`), `LLM::Chord::ContextKey(T)`
+- `LLM::Chord::Context` (`BACKGROUND`, `TODO`, `#value`, `#with_value`, `#abort_signal`,
+  `#with_abort_signal`, `#without_abort_signal`, `#with_cancel`, `#await`, `#telemetry`,
+  `#with_telemetry`, `#trace_in`), `ContextKey(T)`, `AbortSignal`, `AbortController`, `AbortError`
+- `LLM::Chord::Telemetry`: `TelemetryContext`, `TelemetrySpan`, `SpanOptions`, `SpanLink`,
+  `SpanStatus`, `SpanError`, `Attributes`, `Carrier`, `Metrics`, `Counter`, `UpDownCounter`,
+  `Histogram`, `InstrumentOptions`, `Propagation`, `TelemetryStore`, `StoredSpan`,
+  `StoredTrace`, `TraceQuery`, `TracePage`, `MetricQuery`, `StoredMetric`, `NOOP`,
+  `NOOP_METRICS`, `NOOP_PROPAGATION`, `InMemoryTelemetryContext`, `RecordedSpan`,
+  `RecordedMeasurement`, `.attributes`, `.render_trace`
+- `LLM::Chord::Output`: `Limits`, `Retain`, `Excerpt`, `Bounded`, `Skip`, `Buffer`,
+  `Progress`, `Waiter`, `Clock`, `SYSTEM_CLOCK`, `.bound`, `.sanitize`, `.character_end`,
+  `.utf8_byte_length`, `PROGRESS_BYTES_PER_SECOND`
+- `LLM::Chord::ChordError`, `ErrorCode`, `.chord_error?`, `.forbidden`, `.invalid`,
+  `.as_chord_error`, `.run_all`
 - `LLM::Chord.replicated_state(initial) : MutableReplicatedState` (`#value`, `#subscribe`, `#change`, `#replace`)
 - `LLM::Chord.replicated_state(source, on_error = nil) : AttachedReplicatedState` (`#value`, `#subscribe`, `#dispose`)
 - `Delivery`, `DeliveryKind`, `StateListener`, `ErrorReporter`, `AggregateError`,
@@ -229,6 +343,17 @@ and reports to `on_error` (an `AggregateError` when disposal also fails).
 - Asynchronous listeners are opted into with `subscribe(async: true)` and run on
   fibers, instead of being detected from a returned promise. Delivery assumes
   Crystal's default single-threaded scheduler, as chord assumes one event loop.
+- Promises become blocking calls on fibers: `start_span` and `trace_in` return
+  the block's value, `Context#await` replaces `awaitWithContext`, and
+  `Progress#mark_and_wait` returns a `Waiter`.
+- Abort reasons are always exceptions; `abort("text")` wraps the text in an
+  `AbortError`.
+- `Output` works on UTF-8 Crystal strings. JavaScript lone surrogates have no
+  equivalent, so the related upstream cases do not apply.
+- Telemetry span setters follow Crystal naming: `merge_attributes` for
+  `setAttributes`, `status=` for `setStatus`, and `recorded_spans` /
+  `recorded_metrics` for `getSpans` / `getMetrics`. pi-telemetry's typed schema
+  helpers are TypeScript type-level only and are not ported.
 
 ## Development
 
