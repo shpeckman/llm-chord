@@ -62,7 +62,7 @@ describe LLM::Chord::Delta::Draft do
     change.state["f"].as_f.should eq 1.5
     change.state["b"].as_bool.should be_true
     change.state["arr"].as_a.should eq [JSON::Any.new(1_i64)]
-    change.state["obj"].as_h.should eq {"k" => JSON::Any.new(1_i64)}
+    change.state["obj"].value.should eq JSON.parse(%({"k":1}))
     change.state["n"].null?.should be_true
   end
 
