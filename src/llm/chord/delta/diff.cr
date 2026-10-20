@@ -5,9 +5,9 @@ module LLM::Chord::Delta
   end
 
   class Diff
-    DEFAULT_OVERLAP_SCAN    = 65_536
-    MAX_DELTA_OPERATIONS    = 4_096
-    MAX_LCS_CELLS           = 65_536
+    DEFAULT_OVERLAP_SCAN    =  65_536
+    MAX_DELTA_OPERATIONS    =   4_096
+    MAX_LCS_CELLS           =  65_536
     MAX_IDENTITY_CANDIDATES = 200_000
 
     @ops = [] of Op
