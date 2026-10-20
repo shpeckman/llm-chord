@@ -5,21 +5,63 @@ The goal is a faithful Crystal port of
 (v1.3.0 at the time of writing). Upstream source and tests are the
 specification; each phase translates the matching upstream tests into specs.
 
-## Open decisions
+## Decisions
 
-These shape everything from Phase 3 on and should be settled before it starts.
+Settled before Phase 3; they shape everything from there on.
 
-1. **Wire interop with TypeScript hosts.** If Crystal hosts must link to Node
-   hosts or browsers, protocol v4 frames, contract fingerprints (canonical
-   schema JSON, 64-bit hash), and the delta wire format must match upstream
-   byte for byte.
-2. **Hot reload.** Crystal cannot load new code into a running process.
-   Options: process-level reload (each code version is a worker binary;
-   prepare/vote/commit across processes), `dlopen`'d facet libraries (fragile),
-   or leaving reload out and documenting it.
-3. **Schemas.** Upstream uses TypeBox. Options: a data-driven schema DSL that
-   validates `JSON::Any` and emits canonical JSON Schema, or an existing JSON
-   Schema shard that can produce TypeBox-identical canonical output.
+### 1. Wire-compatible with TypeScript hosts
+
+Crystal hosts speak chord's protocol v4 exactly as chord 1.3.0 does: frames,
+contract fingerprints, and the delta wire format match upstream byte for byte.
+The pinned upstream version moves only when both sides move together.
+
+- Chord's model includes browser clients, which run TypeScript, so a Crystal
+  server is useful only if it speaks upstream's protocol.
+- Mixed links make upstream the conformance oracle for the whole protocol:
+  Node hosts linked to Crystal hosts, exercised end to end.
+- The delta wire format already matches; the only other byte-exact
+  requirement is fingerprints, which decision 2 covers.
+
+### 2. Schemas: a data-driven DSL that emits TypeBox's JSON Schema
+
+Upstream fingerprints a contract as `hash64(canonicalJson(description))`
+(`schema.ts`): sorted-key JSON of the description, which embeds TypeBox
+schemas, and TypeBox schemas are plain JSON Schema objects. Matching
+fingerprints therefore needs the same JSON Schema data, not TypeBox itself.
+
+- A schema builder mirroring the TypeBox constructors chord contracts use
+  (object, string, number, integer, boolean, literal, array, union, optional,
+  nullable, record, defaults), stored as JSON so canonical output and
+  fingerprints fall out directly. `canonical_json` and `hash64` (two FNV-1a
+  lanes over UTF-16 code units) are ported verbatim.
+- The runtime operations chord uses, for the subset the builder emits:
+  validation with error paths (`Value.Check` / `Value.Errors`), defaults
+  (`Value.Default`), and stripping unknown fields (`Value.Clean`).
+- Verified against TypeBox under Node on generated schemas and values: schema
+  JSON, fingerprints, validation outcomes, defaulted and cleaned values.
+- No third-party JSON Schema shard: none produces TypeBox-identical output, and
+  validators do not provide default and clean semantics.
+- A macro deriving schemas from Crystal structs may come later, emitting the
+  same JSON.
+
+### 3. Hot reload: process-level, one worker binary per code version
+
+Crystal cannot load new code into a running process, so a code version is a
+worker binary. A reload starts the new binary, runs prepare there (factories
+in recording mode), migrates state from the old process (already JSON), votes,
+and commits by switching routing; the old process keeps serving in-flight roots
+on the previous version until it retires. This reuses upstream's code versions,
+the two-version rule, cross-host prepare/vote/commit, child reconciliation, and
+the host manager.
+
+- Costs: reload granularity is a whole worker, not a single plugin; a reload
+  takes a process start plus a handshake; while both versions are live, calls
+  between them cross IPC.
+- Rejected: `dlopen`'d facet libraries (one GC and runtime per process, no
+  safe unloading); leaving reload out (acceptable only as a stopgap).
+- Constraint on earlier phases: Phases 4–6 treat the code version as an
+  attribute of a host that can be pinned to a process, never assuming the
+  current and previous versions share memory.
 
 ## Phase 1 — delta, Context values, replicated state ✅
 
@@ -59,7 +101,8 @@ These shape everything from Phase 3 on and should be settled before it starts.
 
 ## Phase 3 — schemas and contracts
 
-- The schema layer chosen above.
+- The schema DSL from decision 2, with `canonical_json`, `hash64`, validation,
+  defaults, and clean, verified against TypeBox.
 - `local`, `remote`, `method`, `opaque`, `bind`, `coverage`; `host_named` /
   `host_family` placement; variants, versions, the compatibility rule;
   canonical input identity; fingerprints.
@@ -73,6 +116,7 @@ These shape everything from Phase 3 on and should be settled before it starts.
 - Registries, `create_host` / `serve` / `root`, `define_facet` /
   `define_registry`.
 - Acceptance: upstream's `tutorial.test.ts` over memory links.
+- Code version is a host attribute pinnable to a process (decision 3).
 
 ## Phase 5 — wire protocol and links
 
@@ -82,6 +126,8 @@ These shape everything from Phase 3 on and should be settled before it starts.
 - Links: memory, IPC (Unix socketpair or pipes, line-delimited JSON),
   WebSocket (`HTTP::WebSocket`, plus an `accept_web_sockets` equivalent).
 - Relays and routes: `route` / `authorize` / `resolve`, principal stamping.
+- Conformance: Crystal and Node hosts linked to each other over IPC and
+  WebSocket links, per decision 1.
 
 ## Phase 6 — cluster and process management
 
@@ -91,8 +137,9 @@ These shape everything from Phase 3 on and should be settled before it starts.
 
 ## Phase 7 — reload
 
-- The approach chosen above, following upstream spec §7: load, prepare/vote,
-  gate, migrate, commit, retire; the edge cases in the spec's "Decisions".
+- Process-level reload from decision 3, following upstream spec §7: load (start
+  the new worker binary), prepare/vote, gate, migrate, commit, retire; the edge
+  cases in the spec's "Decisions".
 
 ## Phase 8 — SQLite and telemetry storage
 
