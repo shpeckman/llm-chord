@@ -10,8 +10,8 @@ module LLM::Chord
 
   abstract class AnyResource
     getter key : String
-    getter version : Int32
-    getter? exclusive : Bool
+    property version : Int32
+    property? exclusive : Bool
     getter deps : Array(ResourceDep)
     getter state = ResourceState::Closed
 
