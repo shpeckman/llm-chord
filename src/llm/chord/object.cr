@@ -42,7 +42,7 @@ module LLM::Chord
     end
   end
 
-  record ListenerDecl, origin : AnyResource | Subscribable, source : Proc(Subscribable), select : (Proc(AnyResource, Subscribable))?, fn : ListenerFn
+  record ListenerDecl, origin : AnyResource | Subscribable, source : Proc(Subscribable), selector : (Proc(AnyResource, Subscribable))?, fn : ListenerFn
 
   class Decls
     getter cells = {} of String => Cell
@@ -79,17 +79,17 @@ module LLM::Chord
     def initialize(@grandfathered : ::Set(String), @drained : Proc(Nil)); end
   end
 
-  private record Subscription, origin : AnyResource | Subscribable, select : (Proc(AnyResource, Subscribable))?,
+  private record Subscription, origin : AnyResource | Subscribable, selector : (Proc(AnyResource, Subscribable))?,
     unsubscribe : Proc(Nil), buffer : Array(JSON::Any)?
 
   private class FreshSubscription
     getter origin : AnyResource | Subscribable
-    getter select : (Proc(AnyResource, Subscribable))?
+    getter selector : (Proc(AnyResource, Subscribable))?
     property unsubscribe : Proc(Nil)
     property buffer : Array(JSON::Any)?
     property subscribe : Proc(Nil)?
 
-    def initialize(@origin : AnyResource | Subscribable, @select : (Proc(AnyResource, Subscribable))?)
+    def initialize(@origin : AnyResource | Subscribable, @selector : (Proc(AnyResource, Subscribable))?)
       @unsubscribe = -> { }
       @buffer = [] of JSON::Any
     end
@@ -435,12 +435,12 @@ module LLM::Chord
       begin
         decls.listeners.each do |key, decl|
           previous = @subscriptions[key]?
-          if previous && previous.origin.same?(decl.origin) && ObjectImpl.same_select(previous.select, decl.select)
+          if previous && previous.origin.same?(decl.origin) && ObjectImpl.same_select(previous.selector, decl.selector)
             kept << key
             next
           end
           source = decl.source.call
-          entry = FreshSubscription.new(decl.origin, decl.select)
+          entry = FreshSubscription.new(decl.origin, decl.selector)
           fresh[key] = entry
           if source.is_a?(Readable)
             entry.buffer = nil
@@ -471,7 +471,7 @@ module LLM::Chord
           end
           fresh.each do |key, entry|
             entry.subscribe.try(&.call)
-            @subscriptions[key] = Subscription.new(entry.origin, entry.select, entry.unsubscribe, entry.buffer)
+            @subscriptions[key] = Subscription.new(entry.origin, entry.selector, entry.unsubscribe, entry.buffer)
             buffered = entry.buffer || [] of JSON::Any
             entry.buffer = nil
             buffered.each { |event| deliver(key, event) }
