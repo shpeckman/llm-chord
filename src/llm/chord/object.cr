@@ -116,17 +116,17 @@ module LLM::Chord
     getter? host_lifetime : Bool
     getter status = ObjectStatus::Activating
     getter ready = Future(Nil).new
-    getter decls = Decls.new
+    property decls = Decls.new
     getter call_abort = AbortController.new
     getter implementations = {} of Int32 => Installed
     getter leases = {} of String => Int32
     property min_code_version = 0
     property gate : Gate? = nil
     property deferred_runtime = false
-    @service : Service? = nil
-    @pending = ::Set(Decls).new
+    protected property service : Service? = nil
+    protected getter pending = ::Set(Decls).new
     @refs = ::Set(LocalRef).new
-    @open_order = [] of AnyResource
+    protected getter open_order = [] of AnyResource
     @activation_abort = AbortController.new
     @subscriptions = {} of String => Subscription
     @invocations = ::Set(Future(Nil)).new
@@ -331,7 +331,7 @@ module LLM::Chord
       @host.report(error)
     end
 
-    private def open(resources : Array(AnyResource), refs : Array(Ref)) : Nil
+    protected def open(resources : Array(AnyResource), refs : Array(Ref)) : Nil
       signal = @activation_abort.signal
       opening = {} of AnyResource => Future(Nil)
       futures = resources.map { |resource| open_one(resource, resources, opening, signal) }
@@ -366,7 +366,7 @@ module LLM::Chord
       future
     end
 
-    private def wait_hydrated(run : Run) : Nil
+    protected def wait_hydrated(run : Run) : Nil
       exposed = run.implementation.try(&.members) || {} of String => MemberValue
       sources = run.created_derives.map(&.as(Readable))
       exposed.each_value { |value| sources << value if value.is_a?(Readable) }
@@ -391,7 +391,7 @@ module LLM::Chord
       work.wait
     end
 
-    private def init_cells(run : Run, signal : AbortSignal) : Nil
+    protected def init_cells(run : Run, signal : AbortSignal) : Nil
       return if run.inits.empty?
       futures = run.inits.map do |(cell, init)|
         Future(Nil).run do
@@ -402,7 +402,7 @@ module LLM::Chord
       Chord.await_all(futures)
     end
 
-    private def unwind(run : Run) : Nil
+    protected def unwind(run : Run) : Nil
       run.created_derives.each(&.detach)
       resources = run.created_resources.sort_by { |resource| -(@open_order.index(resource) || -1) }
       steps = [] of Proc(Nil)
@@ -411,7 +411,7 @@ module LLM::Chord
       Chord.run_all(steps, "#{@address}: cleanup failed")
     end
 
-    private def refresh_schemas : Nil
+    protected def refresh_schemas : Nil
       schemas = {} of Source => Array(Schema::Source)
       @implementations.each_value do |installed|
         Chord.member_schemas(installed.service, installed.implementation).each do |source, list|
