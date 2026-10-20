@@ -26,6 +26,8 @@ module LLM::Chord
 
   record Upstream, link : Link, principal : JSON::Any, options : LinkOptions
 
+  alias PluginRef = Facet | String
+
   record CodeVersionState, id : Int32, services : Hash(String, Service), tables : Hash(String, RegistryTable),
     roots : Hash(String, Int32), abort : AbortController
 
