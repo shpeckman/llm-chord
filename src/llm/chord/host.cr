@@ -137,8 +137,9 @@ module LLM::Chord
 
     def serve(contract : Contract, *, lifetime : Lifetime = Lifetime::Referenced, linger : Time::Span? = nil,
               accepts : Accepts? = nil, &factory : JSON::Any, JSON::Any, ObjectScope -> Implementation) : Nil
+      raise ArgumentError.new("host.serve during a reload; serve from a facet passed to reload()") if @reloading
       service = Service.new(contract, factory, lifetime, linger, accepts, "")
-      serve_into(service)
+      serve_into(@current.services, service)
       start_host_object(service) if service.host_lifetime?
     end
 
