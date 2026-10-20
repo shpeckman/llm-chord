@@ -11,7 +11,7 @@ description: |
 
 dependencies:
   typebox:
-    path: ../typebox
+    github: shpeckman/typebox
 
 crystal: ">= 1.21.0"
 
