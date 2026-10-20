@@ -191,7 +191,7 @@ module LLM::Chord::Delta
     ) : Array({Int32, Int32})?
       before_count = before_end - before_start
       after_count = after_end - after_start
-      return nil if before_count == after_count
+      return if before_count == after_count
       matches = [] of {Int32, Int32}
       if after_count < before_count
         before_index = before_start
@@ -199,7 +199,7 @@ module LLM::Chord::Delta
           while before_index < before_end && before[before_index] != after[after_index]
             before_index += 1
           end
-          return nil if before_index == before_end
+          return if before_index == before_end
           matches << {before_index, after_index}
           before_index += 1
         end
@@ -210,7 +210,7 @@ module LLM::Chord::Delta
         while after_index < after_end && before[before_index] != after[after_index]
           after_index += 1
         end
-        return nil if after_index == after_end
+        return if after_index == after_end
         matches << {before_index, after_index}
         after_index += 1
       end
