@@ -1,6 +1,13 @@
 # spec/json_spec.cr
 require "./spec_helper"
 
+private struct Sample
+  include JSON::Serializable
+
+  property n : Int64
+  property s : String
+end
+
 describe LLM::Chord::Json do
   it "deep copies independently of the source" do
     original = JSON.parse(%({"a":[1,2],"b":{"c":"x"}}))

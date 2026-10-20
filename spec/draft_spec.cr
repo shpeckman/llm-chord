@@ -159,4 +159,16 @@ describe LLM::Chord::Delta::Draft do
       expect_raises(Exception) { change.state["a"].pop }
     end
   end
+
+  it "reads typed values by key" do
+    tracker = track(JSON.parse(%({"n":5,"s":"hi","arr":[1],"obj":{"k":1},"f":1.5,"b":true})))
+    change = tracker.begin_change
+    change.state.int("n").should eq 5_i64
+    change.state.string?("s").should eq "hi"
+    change.state.string?("missing").should be_nil
+    change.state.float("f").should eq 1.5
+    change.state.bool("b").should be_true
+    change.state.array("arr").should eq [JSON::Any.new(1_i64)]
+    change.state.object("obj").should eq JSON.parse(%({"k":1})).as_h
+  end
 end
