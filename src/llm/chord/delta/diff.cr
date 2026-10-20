@@ -196,7 +196,9 @@ module LLM::Chord::Delta
       if after_count < before_count
         before_index = before_start
         (after_start...after_end).each do |after_index|
-          before_index += 1 while before_index < before_end && before[before_index] != after[after_index]
+          while before_index < before_end && before[before_index] != after[after_index]
+            before_index += 1
+          end
           return nil if before_index == before_end
           matches << {before_index, after_index}
           before_index += 1
@@ -205,7 +207,9 @@ module LLM::Chord::Delta
       end
       after_index = after_start
       (before_start...before_end).each do |before_index|
-        after_index += 1 while after_index < after_end && before[before_index] != after[after_index]
+        while after_index < after_end && before[before_index] != after[after_index]
+          after_index += 1
+        end
         return nil if after_index == after_end
         matches << {before_index, after_index}
         after_index += 1
