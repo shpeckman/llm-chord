@@ -178,7 +178,7 @@ module LLM::Chord
       begin
         operation.reload.try(&.commit)
       ensure
-        end_reload(@host)
+        Chord.end_reload(@host)
       end
     end
 
@@ -202,7 +202,7 @@ module LLM::Chord
       rescue error
         @host.report(error)
       ensure
-        end_reload(@host)
+        Chord.end_reload(@host)
       end
     end
 
@@ -216,7 +216,7 @@ module LLM::Chord
           gate_deadline: options_json.try { |o| o["gateDeadline"]?.try(&.as_i.to_i32) },
           retire_deadline: options_json.try { |o| o["retireDeadline"]?.try(&.as_i.to_i32) },
         )
-        operation.reload = begin_reload(@host, plugins, options, frame.int("codeVersion").to_i32)
+        operation.reload = Chord.begin_reload(@host, plugins, options, frame.int("codeVersion").to_i32)
         raise cancelled.call if operation.cancelled
         operation.state = :preparing
         operation.reload.not_nil!.prepare
@@ -231,7 +231,7 @@ module LLM::Chord
           rescue cleanup
             @host.report(cleanup)
           end
-          end_reload(@host)
+          Chord.end_reload(@host)
         end
         @operation = nil if @operation.same?(operation)
         unless operation.cancelled
