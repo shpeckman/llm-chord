@@ -100,12 +100,16 @@ module LLM::Chord
     getter decls = Decls.new
     getter call_abort = AbortController.new
     getter implementations = {} of Int32 => Installed
+    getter leases = {} of String => Int32
+    property min_code_version = 0
+    property gate : Gate? = nil
+    property deferred_runtime = false
     @service : Service? = nil
     @pending = ::Set(Decls).new
     @refs = ::Set(LocalRef).new
     @open_order = [] of AnyResource
     @activation_abort = AbortController.new
-    @subscriptions = {} of String => Proc(Nil)
+    @subscriptions = {} of String => Subscription
     @invocations = ::Set(Future(Nil)).new
     @tasks = {} of String => Tuple(AbortController, Future(Nil))
     @stopped = ::Set(Future(Nil)).new
