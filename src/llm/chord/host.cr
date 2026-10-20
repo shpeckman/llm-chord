@@ -26,20 +26,6 @@ module LLM::Chord
 
   record Upstream, link : Link, principal : JSON::Any, options : LinkOptions
 
-  alias PluginRef = Facet | String
-
-  class CodeVersionState
-    getter id : Int32
-    getter services : Hash(String, Service)
-    property tables : Hash(String, RegistryTable)
-    getter roots : Hash(String, Int32)
-    getter abort : AbortController
-
-    def initialize(@id : Int32, @services : Hash(String, Service), @tables : Hash(String, RegistryTable),
-                   @roots : Hash(String, Int32), @abort : AbortController)
-    end
-  end
-
   def self.upstream(link : Link, *, principal, **options) : Upstream
     Upstream.new(link, json_value(principal), LinkOptions.new(**options))
   end
@@ -52,113 +38,58 @@ module LLM::Chord
     getter principal : JSON::Any
     getter ready_timeout : Time::Span?
     getter kind : PeerKind
+    getter code_version = 1
     getter connections = ::Set(Connection).new
     getter upstream : Connection? = nil
     protected property in_factory = 0
     protected getter source_options : SourceOptions { SourceOptions.new(@dev, ->(error : Exception) { report(error) }) }
-    protected getter objects = {} of String => ObjectImpl
+    @objects = {} of String => ObjectImpl
     @dying = {} of String => ObjectImpl
-    protected getter facets = {} of String => Facet
+    @facets = {} of String => Facet
     @facet_runs = {} of String => AbortController
-    protected getter host_objects = {} of String => Ref
-    protected getter code_versions = {} of Int32 => CodeVersionState
-    protected property current : CodeVersionState
-    protected property previous : CodeVersionState? = nil
-    protected property pending : CodeVersionState? = nil
-    protected property gating : ::Set(String)? = nil
-    protected property reloading = false
-    protected property remote_modules = {} of String => Array(String)
-    protected property remote_removed = {} of String => Array(String)
-    protected getter failed : Exception? = nil
+    @host_objects = {} of String => Ref
+    @services = {} of String => Service
+    @tables = {} of String => RegistryTable
     @order = {} of String => Hash(String, Int32)
     @subscribers = {} of String => Listeners(TableListener)
     @bindings = {} of String => RemoteBinding
     @lingering = {} of String => RemoteBinding
     @routes = {} of String => Route
+    @roots = {} of String => Int32
     @local = ::Set(String).new
     @foreign = {} of String => ::Set(Connection)
     @root_links = {} of String => ::Set(Connection)
-    @touches = {} of String => ::Set(ObjectImpl)
-    @retirement_watchers = ::Set(Proc(Nil)).new
-    @deferred_hellos = {} of Connection => Int32
-    @reload_waiters = [] of Proc(Nil)
-    @child_reloads : ChildReloads? = nil
     @retire_allowed = 0
     @origin_seq = 0
     @root_seq = 0_i64
-    @code_version_seq = 1
     @incarnation : String = Random.new.hex(3)
     @principal_key : Proc(JSON::Any, String)
     @self_key : String
     @on_error : Reporter
     @linger_types : Hash(String, Time::Span)
     @linger_cap : Int32
-    @loader : Proc(Array(String), Array(Facet))?
 
     def initialize(*, self principal, @name : String = "host", principal_key : Proc(JSON::Any, String)? = nil,
                    @dev : Bool = false, on_error = nil, @ready_timeout : Time::Span? = 60.seconds,
                    @kind : PeerKind = PeerKind::Host, upstream : Upstream? = nil,
-                   linger : Hash(String, Time::Span)? = nil, linger_cap : Int32 = 4,
-                   loader : Proc(Array(String), Array(Facet))? = nil)
+                   linger : Hash(String, Time::Span)? = nil, linger_cap : Int32 = 4)
       @principal = Chord.json_value(principal)
       @principal_key = principal_key || Host.canonical_key
       @self_key = @principal_key.call(@principal)
       @on_error = Host.reporter(on_error)
       @linger_types = linger || {} of String => Time::Span
       @linger_cap = linger_cap
-      @loader = loader
-      @current = CodeVersionState.new(1, {} of String => Service, {} of String => RegistryTable,
-        {} of String => Int32, AbortController.new)
-      @code_versions[1] = @current
       upstream.try { |link| connect(link.link, principal: link.principal, options: link.options) }
     end
 
-    private def child_reloads : ChildReloads
-      @child_reloads ||= ChildReloads.new(self)
-    end
-
-    def code_version : Int32
-      @current.id
-    end
-
     def previous_code_version : Int32?
-      @previous.try(&.id)
-    end
-
-    protected def has_code_version?(code_version : Int32) : Bool
-      @code_versions.has_key?(code_version)
-    end
-
-    protected def retained_code_versions : Array(Tuple(Int32, Hash(String, Service)))
-      result = [] of Tuple(Int32, Hash(String, Service))
-      @code_versions.each { |(id, state)| result << {id, state.services} }
-      if pending = @pending
-        result << {pending.id, pending.services}
-      end
-      result
-    end
-
-    protected def pending_code_version : Int32?
-      @pending.try(&.id)
-    end
-
-    protected def next_code_version_id(given : Int32? = nil) : Int32
-      if given && given <= @current.id
-        raise ArgumentError.new("code version #{given} is not newer than #{@current.id}")
-      end
-      @code_version_seq = given || @code_version_seq + 1
-      @code_version_seq
-    end
-
-    protected def peek_next_code_version : Int32
-      @code_version_seq + 1
+      nil
     end
 
     def serve(contract : Contract, *, lifetime : Lifetime = Lifetime::Referenced, linger : Time::Span? = nil,
               accepts : Accepts? = nil, &factory : JSON::Any, JSON::Any, ObjectScope -> Implementation) : Nil
-      raise ArgumentError.new("host.serve during a reload; serve from a facet passed to reload()") if @reloading
       service = Service.new(contract, factory, lifetime, linger, accepts, "")
-      serve_into(@current.services, service)
+      serve_into(service)
       start_host_object(service) if service.host_lifetime?
     end
 
@@ -191,7 +122,7 @@ module LLM::Chord
       @root_seq += 1
       root_id = "#{@name}##{@incarnation}:#{@root_seq}"
       @local << root_id
-      join_root(root_id, code_version || @current.id, principal.nil? ? nil : Chord.json_value(principal), signal) do |ctx|
+      join_root(root_id, code_version || @code_version, principal.nil? ? nil : Chord.json_value(principal), signal) do |ctx|
         yield ctx
       end
     end
@@ -248,186 +179,45 @@ module LLM::Chord
       @on_error.call(error)
     end
 
-    protected def resolve(plugins : Array(PluginRef)) : Array(Facet)
-      modules = plugins.select(String)
-      loaded = [] of Facet
-      unless modules.empty?
-        raise ArgumentError.new("loading modules needs create_host({ loader })") if @loader.nil?
-        loaded = @loader.not_nil!.call(modules)
-      end
-      index = 0
-      plugins.map do |ref|
-        if ref.is_a?(Facet)
-          ref
-        else
-          facet = loaded[index]
-          index += 1
-          facet
-        end
-      end
-    end
-
-    def reload(facets : Enumerable(Facet), options : ReloadOptions = ReloadOptions.new) : ReloadReport
-      if !@kind.client? && !@upstream.nil?
-        raise ChordError.new(ErrorCode::Unavailable, "reloads are coordinated by the server", reason: "not_coordinator")
-      end
-      children = @connections.any? { |c| c.role.downstream? && c.peer.kind.host? }
-      if children || !options.remote.nil? || !options.remote_remove.nil?
-        Chord.run_cluster_reload(self, facets.to_a, options)
-      else
-        Chord.run_reload(self, facets.to_a, options)
-      end
-    end
-
-    protected def remember_remote_modules(remote : Hash(String, Array(String))?, remove : Hash(String, Array(String))?) : Nil
-      prefixes = ::Set(String).new
-      remote.try &.each_key { |prefix| prefixes << prefix }
-      remove.try &.each_key { |prefix| prefixes << prefix }
-      prefixes.each do |prefix|
-        modules = remote.try(&.[prefix]?) || [] of String
-        removed = remove.try(&.[prefix]?) || [] of String
-        merged = (@remote_modules[prefix]? || [] of String).to_set
-        modules.each { |m| merged << m }
-        @remote_modules[prefix] = merged.to_a.reject { |m| removed.includes?(m) }
-        removed_merged = (@remote_removed[prefix]? || [] of String).to_set
-        removed.each { |m| removed_merged << m }
-        @remote_removed[prefix] = removed_merged.to_a.reject { |m| modules.includes?(m) }
-      end
-    end
-
-    protected def retirable? : Bool
-      previous = @previous
-      return false if previous.nil? || !previous.roots.empty?
-      @kind.client? || @upstream.nil? || previous.id <= @retire_allowed
-    end
-
-    protected def retire : Nil
-      previous = @previous
-      return unless previous
-      @previous = nil
-      @code_versions.delete(previous.id)
-      @objects.values.each { |object| retire_implementation(object, previous.id) }
-      @connections.each do |connection|
-        connection.send(Frame.build("retire", codeVersion: previous.id)) if connection.role.downstream? && connection.peer.kind.host?
-      end
-      retirement_changed
-    end
-
-    private def maybe_retire : Nil
-      retire if retirable?
-    end
-
-    protected def watch_retirement(&watcher : ->) : Proc(Nil)
-      @retirement_watchers << watcher
-      -> { @retirement_watchers.delete(watcher); nil }
-    end
-
-    private def retirement_changed : Nil
-      @retirement_watchers.to_a.each(&.call)
-    end
-
-    protected def announce_retired(connection : Connection) : Nil
-      retired = (@previous || @current).id - 1
-      connection.send(Frame.build("retire", codeVersion: retired)) if retired > 0
-    end
-
-    protected def retire_implementation(object : ObjectImpl, code_version : Int32) : Nil
-      installed = object.implementations.delete(code_version)
-      return if installed.nil? || installed.decls.same?(object.decls)
-      kept = object.all_decls
-      refs = ::Set(Ref).new
-      resources = ::Set(AnyResource).new
-      derives = ::Set(Derived).new
-      kept.each do |decls|
-        decls.refs.each_value { |ref| refs << ref }
-        decls.resources.each_value { |resource| resources << resource }
-        decls.derives.each_value { |derived| derives << derived }
-      end
-      installed.decls.derives.each_value { |derived| derived.detach unless derives.includes?(derived) }
-      closing = installed.decls.resources.values.reject { |resource| resources.includes?(resource) }
-        .sort_by { |resource| -(object.open_order.index(resource) || -1) }
-      releasing = installed.decls.refs.values.reject { |ref| refs.includes?(ref) }
-      object.refresh_schemas
-      steps = [] of Proc(Nil)
-      closing.each { |resource| steps << -> { resource.close(object.open_order) } }
-      releasing.each { |ref| steps << -> { ref.release } }
-      begin
-        Chord.run_all(steps, "#{object.address}: retiring code version #{code_version} failed")
-      rescue error
-        report(error)
-      end
-    end
-
-    protected def fail(error : Exception) : Nil
-      @failed ||= error
-      report(error)
-    end
-
-    protected def reload_ended : Nil
-      @reloading = false
-      deferred = @deferred_hellos.to_a
-      @deferred_hellos.clear
-      deferred.each { |(connection, version)| peer_hello(connection, version) if connection.open? }
-      @reload_waiters.each(&.call)
-      @reload_waiters.clear
-      maybe_retire
-    end
-
-    protected def when_reload_ended : Future(Nil)
-      future = Future(Nil).new
-      unless @reloading
-        future.resolve(nil)
-        return future
-      end
-      @reload_waiters << -> { future.resolve(nil); nil }
-      future
+    protected def code_version?(code_version : Int32) : Bool
+      code_version == @code_version
     end
 
     protected def service(type_name : String) : Service?
-      @current.services[type_name]? || @pending.try(&.services[type_name]?)
+      @services[type_name]?
     end
 
-    protected def binding_service(type_name : String, candidate : Bool) : Service?
-      (candidate ? @pending.try(&.services[type_name]?) : nil) || service(type_name)
-    end
-
-    protected def serve_into(services : Hash(String, Service), service : Service) : Nil
+    protected def serve_into(service : Service) : Nil
       contract = service.contract
-      raise ArgumentError.new("#{contract.name} is already served") if services.has_key?(contract.name)
+      raise ArgumentError.new("#{contract.name} is already served") if @services.has_key?(contract.name)
       placement = contract.description.host
       if placement && !placement.placed_on?(@name)
         raise ArgumentError.new("#{contract.name} is declared for #{placement.text}, but #{@name} serves it")
       end
-      services[contract.name] = service
+      @services[contract.name] = service
     end
 
     protected def join_root(root_id : String, code_version : Int32, principal : JSON::Any? = nil,
                             signal : AbortSignal? = nil, from : Connection? = nil, &)
-      state = @code_versions[code_version]?
-      unless state
+      unless code_version?(code_version)
         @local.delete(root_id)
         raise ChordError.new(ErrorCode::Superseded, "code version #{code_version} is not retained by #{@name}")
       end
       if from && !@local.includes?(root_id)
         (@foreign[root_id] ||= ::Set(Connection).new) << from
       end
-      state.roots[root_id] = (state.roots[root_id]? || 0) + 1
-      signals = signal ? [signal, state.abort.signal] : [state.abort.signal]
-      ctx = Ctx.new(self, signals, root_id, code_version, principal || @principal)
+      @roots[root_id] = (@roots[root_id]? || 0) + 1
+      ctx = Ctx.new(self, signal ? [signal] : [] of AbortSignal, root_id, code_version, principal || @principal)
       begin
         yield ctx
       ensure
         ctx.close
-        count = (state.roots[root_id]? || 1) - 1
+        count = (@roots[root_id]? || 1) - 1
         if count > 0
-          state.roots[root_id] = count
+          @roots[root_id] = count
         else
-          state.roots.delete(root_id)
-          unless @foreign.has_key?(root_id)
-            end_root(root_id)
-            maybe_retire
-            retirement_changed
-          end
+          @roots.delete(root_id)
+          end_root(root_id) unless @foreign.has_key?(root_id)
         end
       end
     end
@@ -439,24 +229,20 @@ module LLM::Chord
     protected def foreign_root_ended(root_id : String, from : Connection) : Nil
       links = @foreign[root_id]?
       return unless links && links.delete(from) && links.empty?
-      if @code_versions.values.any? { |state| state.roots.has_key?(root_id) }
+      if @roots.has_key?(root_id)
         @foreign.delete(root_id)
       else
         end_root(root_id)
       end
     end
 
-    protected def touch(root_id : String, object : ObjectImpl) : Nil
-      (@touches[root_id] ||= ::Set(ObjectImpl).new) << object
-    end
-
     protected def acquire(type : Contract, input, principal : JSON::Any?, owner : RefOwner, from : ObjectImpl? = nil,
-                          state : Bool = true, candidate : Bool = false) : Ref
+                          state : Bool = true) : Ref
       raw = Chord.json_input(input)
       if elsewhere = elsewhere(type, raw)
         return acquire_remote(type, elsewhere[0], elsewhere[1], principal, owner, state)
       end
-      service = binding_service(type.name, candidate) || raise unknown_type(type.name)
+      service = @services[type.name]? || raise unknown_type(type.name)
       Chord.bind(service.contract, service.accepts, type)
       address, normalized, chosen = locate(service, raw, principal || @principal)
       placement = service.contract.description.host
@@ -467,25 +253,18 @@ module LLM::Chord
       if from && object && (object.same?(from) || Host.reaches?(object, from))
         raise Chord.invalid("cycle", "#{from.address} -> #{address} would create a ref cycle")
       end
-      if object.nil?
-        if gating = @gating
-          if gating.includes?(type.name)
-            raise ChordError.new(ErrorCode::UpgradeConflict, "#{type.name} is being upgraded; retry", reason: "gate")
-          end
-        end
-        object = create_object(service, type, address, normalized, chosen)
-      end
+      object ||= create_object(service, type, address, normalized, chosen)
       ref = LocalRef.new(object, type, owner)
       object.add_ref(ref)
       ref
     end
 
-    protected def address_of(type : Contract, input, principal : JSON::Any, candidate : Bool = false) : String
+    protected def address_of(type : Contract, input, principal : JSON::Any) : String
       raw = Chord.json_input(input)
       if elsewhere = elsewhere(type, raw)
         return remote_key(type, elsewhere[1], principal)
       end
-      service = binding_service(type.name, candidate) || raise unknown_type(type.name)
+      service = @services[type.name]? || raise unknown_type(type.name)
       locate(service, raw, principal)[0]
     end
 
@@ -499,19 +278,16 @@ module LLM::Chord
     end
 
     protected def registry_table(registry : AnyRegistry, ctx : Ctx?) : RegistryTable
-      state = if ctx
-                @code_versions[ctx.code_version]? ||
-                  raise ChordError.new(ErrorCode::Superseded, "code version #{ctx.code_version} is retired")
-              else
-                @current
-              end
-      state.tables[registry.name]? || EMPTY_TABLE
+      if ctx && !code_version?(ctx.code_version)
+        raise ChordError.new(ErrorCode::Superseded, "code version #{ctx.code_version} is retired")
+      end
+      @tables[registry.name]? || EMPTY_TABLE
     end
 
     protected def subscribe_registry(name : String, listener : TableListener) : Proc(Nil)
       listeners = @subscribers[name] ||= Listeners(TableListener).new
       id = listeners.add(listener)
-      listener.call(@current.tables[name]? || EMPTY_TABLE, @current.id)
+      listener.call(@tables[name]? || EMPTY_TABLE, @code_version)
       listeners.remover(id)
     end
 
@@ -525,57 +301,39 @@ module LLM::Chord
     protected def registries_changed(including : ObjectImpl? = nil) : Nil
       entries = live_decls.reject { |(object, _)| object.same?(including) }
       entries << {including, including.decls} if including
-      install_tables(@current, build_tables(entries))
+      install_tables(build_tables(entries))
     end
 
     protected def peer_hello(connection : Connection, code_version : Int32) : Nil
-      if code_version > @current.id
-        report(ChordError.new(ErrorCode::Invalid, "#{connection.name} runs code version #{code_version}, ahead of #{@current.id}"))
+      if code_version > @code_version
+        report(ChordError.new(ErrorCode::Invalid, "#{connection.name} runs code version #{code_version}, ahead of #{@code_version}"))
         connection.link.close("code version ahead of parent")
         return
       end
-      if @reloading
-        connection.peer_code_version = code_version
-        connection.fenced_code_versions << code_version if code_version < @current.id
-        @deferred_hellos[connection] = code_version
-        return
-      end
-      if code_version == @current.id
+      if code_version == @code_version
         connection.mark_synced(code_version)
-        announce_retired(connection)
         return
       end
-      connection.peer_code_version = code_version
-      connection.fenced_code_versions << code_version
-      spawn do
-        begin
-          Chord.reconcile_child(self, connection)
-        rescue error
-          report(error)
-          connection.link.close("reconciliation failed")
-        end
-      end
+      report(ChordError.new(ErrorCode::Unavailable,
+        "#{connection.name} runs code version #{code_version}, behind #{@code_version}; reconciling it needs reload"))
+      connection.link.close("code version behind parent")
     end
 
     protected def allow_retire(code_version : Int32) : Nil
       @retire_allowed = Math.max(@retire_allowed, code_version)
-      maybe_retire
-      retirement_changed
     end
 
     protected def on_reload_frame(connection : Connection, frame : Frame) : Nil
-      child_reloads.handle(connection, frame)
+      return unless frame.t == "prepare"
+      error = ChordError.new(ErrorCode::Unavailable, "#{@name} cannot reload", reason: "reload_unsupported")
+      connection.send(Frame.build("vote", reload: frame.int("reload"), error: Wire.to_error(error)))
     end
 
     protected def connection_closed(connection : Connection) : Nil
       @connections.delete(connection)
-      @deferred_hellos.delete(connection)
       @foreign.to_a.each { |(root_id, links)| foreign_root_ended(root_id, connection) if links.includes?(connection) }
       @root_links.each_value(&.delete(connection))
-      if @upstream.same?(connection)
-        @upstream = nil
-        child_reloads.parent_lost
-      end
+      @upstream = nil if @upstream.same?(connection)
     end
 
     protected def binding_idle(binding : RemoteBinding) : Nil
@@ -618,8 +376,6 @@ module LLM::Chord
     private def end_root(root_id : String) : Nil
       @local.delete(root_id)
       @foreign.delete(root_id)
-      (@touches[root_id]? || [] of ObjectImpl).to_a.each(&.root_ended(root_id))
-      @touches.delete(root_id)
       @root_links.delete(root_id).try &.each(&.send(Frame.build("root_end", rootId: root_id)))
     end
 
@@ -628,16 +384,12 @@ module LLM::Chord
       connection
     end
 
-    protected def facet_api(facet : String, signal : AbortSignal, added : Array(Service), services : Hash(String, Service)) : FacetApi
-      FacetApi.new(self, facet, signal, ->(service : Service) { serve_into(services, service); added << service; nil })
-    end
-
     private def install_facet(facet : Facet) : Array(Ref)
       raise ArgumentError.new("facet #{facet.name} is already installed") if @facets.has_key?(facet.name)
       added = [] of Service
       run = AbortController.new
       begin
-        facet.setup.call(facet_api(facet.name, run.signal, added, @current.services))
+        facet.setup.call(FacetApi.new(self, facet.name, run.signal, added))
       rescue error
         run.abort(error)
         raise error
@@ -647,13 +399,13 @@ module LLM::Chord
       added.select(&.host_lifetime?).map { |service| start_host_object(service) }
     end
 
-    protected def facet_run_changed(name : String, run : AbortController?) : Nil
+    private def facet_run_changed(name : String, run : AbortController?) : Nil
       replaced = @facet_runs[name]?
       run ? (@facet_runs[name] = run) : @facet_runs.delete(name)
       replaced.abort(ChordError.new(ErrorCode::Gone, "facet #{name} was replaced or removed")) if replaced && !replaced.same?(run)
     end
 
-    protected def start_host_object(service : Service) : Ref
+    private def start_host_object(service : Service) : Ref
       ref = acquire(service.contract, nil, nil, RefOwner::Host)
       @host_objects[service.contract.name] = ref
       ready = ref.ready
@@ -775,11 +527,11 @@ module LLM::Chord
       ChordError.new(ErrorCode::Unavailable, "#{type_name} is not served by #{@name}", reason: "unknown_type")
     end
 
-    protected def live_decls(candidates : Bool = false) : Array(Tuple(ObjectImpl, Decls))
-      @objects.values.select(&.status.live?).reject { |object| !candidates && object.deferred_runtime }.map { |object| {object, object.decls} }
+    private def live_decls : Array(Tuple(ObjectImpl, Decls))
+      @objects.values.select(&.status.live?).map { |object| {object, object.decls} }
     end
 
-    protected def build_tables(entries : Array(Tuple(ObjectImpl, Decls))) : Hash(String, RegistryTable)
+    private def build_tables(entries : Array(Tuple(ObjectImpl, Decls))) : Hash(String, RegistryTable)
       by_registry = {} of String => Hash(String, Tuple(RegistryEntry, ObjectImpl))
       entries.each do |(object, decls)|
         decls.registrations.each_value do |registration|
@@ -805,16 +557,15 @@ module LLM::Chord
       tables
     end
 
-    protected def install_tables(code_version : CodeVersionState, tables : Hash(String, RegistryTable), all : Bool = false) : Nil
-      before = code_version.tables
-      code_version.tables = tables
-      return unless code_version.id == @current.id
+    private def install_tables(tables : Hash(String, RegistryTable)) : Nil
+      before = @tables
+      @tables = tables
       @subscribers.each do |name, listeners|
         following = tables[name]? || EMPTY_TABLE
-        next if !all && Host.same_table?(before[name]? || EMPTY_TABLE, following)
+        next if Host.same_table?(before[name]? || EMPTY_TABLE, following)
         current = listeners.snapshot
-        version = code_version.id
-        Publish.enqueue { notify_table(current, following, version) }
+        code_version = @code_version
+        Publish.enqueue { notify_table(current, following, code_version) }
       end
     end
 
