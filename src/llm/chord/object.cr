@@ -233,7 +233,7 @@ module LLM::Chord
       service = @host.service(@type_name)
       raise ChordError.new(ErrorCode::Unavailable, "#{@type_name} is not served", reason: "unknown_type") unless service
       @service = service
-      run = run_factory(service)
+      run = run(service, nil)
       begin
         open(run.created_resources, run.created_refs)
         raise abandoned if signal.aborted?
@@ -243,19 +243,26 @@ module LLM::Chord
         raise abandoned if signal.aborted?
         @host.check_registrations(self, run.decls)
         @decls = run.decls
-        code_version = @host.code_version
-        @implementations[code_version] = Installed.new(code_version, service, run.implementation.not_nil!, run.decls)
+        @host.retained_code_versions.each do |(retained, services)|
+          if services[@type_name]?.try(&.same?(service))
+            @implementations[retained] = Installed.new(retained, service, run.implementation.not_nil!, run.decls)
+          end
+        end
+        raise ChordError.new(ErrorCode::Superseded, "#{@address}: code changed during activation") unless @implementations.has_key?(@host.code_version)
         run.created_derives.each(&.attach)
         refresh_schemas
-        @host.registries_changed(self) unless run.decls.registrations.empty?
-        start_runtime
+        @deferred_runtime = !@implementations.has_key?(@host.code_version)
+        unless @deferred_runtime
+          @host.registries_changed(self) unless run.decls.registrations.empty?
+          start_runtime
+        end
         raise abandoned if signal.aborted?
         @status = ObjectStatus::Live
       rescue error
         @call_abort.abort(error)
         stop_listeners
         stop_tasks
-        registered = !@decls.registrations.empty?
+        registered = !@decls.registrations.empty? && !@deferred_runtime
         @implementations.clear
         @decls = Decls.new
         @host.registries_changed if registered
