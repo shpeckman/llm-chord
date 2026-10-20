@@ -5,7 +5,7 @@ require "benchmark"
 include LLM::Chord::Delta
 
 N = 10_000
-U = 1_000
+U =  1_000
 
 Benchmark.bm do |bm|
   bm.report("bulk unshift + prepare") do
