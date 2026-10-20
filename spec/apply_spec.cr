@@ -65,6 +65,38 @@ describe LLM::Chord::Delta do
       base = JSON.parse(%({"a":1}))
       expect_raises(PathError) { apply(base, [Op::Set.new(path("missing", "deep"), JSON::Any.new(1_i64))]) }
     end
+
+    it "mutates the target in place" do
+      base = JSON.parse(%({"a":0}))
+      result = apply(base, [Op::Set.new(path("a"), JSON::Any.new(1_i64))])
+      result.should eq JSON.parse(%({"a":1}))
+      base.should eq JSON.parse(%({"a":1}))
+    end
+
+    it "truncates an entire string to empty" do
+      base = JSON.parse(%({"s":"ab"}))
+      apply(base, [Op::Truncate.new(path("s"), 2)]).should eq JSON.parse(%({"s":""}))
+    end
+
+    it "truncates past the end to empty" do
+      base = JSON.parse(%({"s":"ab"}))
+      apply(base, [Op::Truncate.new(path("s"), 5)]).should eq JSON.parse(%({"s":""}))
+    end
+
+    it "rejects a move with a mismatched permutation" do
+      base = JSON.parse(%([0,1,2]))
+      expect_raises(PathError) { apply(base, [Op::Move.new([] of Seg, [1, 0])]) }
+    end
+
+    it "rejects a splice on a non-array" do
+      base = JSON.parse(%({"a":1}))
+      expect_raises(PathError) { apply(base, [Op::Splice.new(path("a"), 0, 0, [] of JSON::Any)]) }
+    end
+
+    it "rejects a move on a non-array" do
+      base = JSON.parse(%({"a":1}))
+      expect_raises(PathError) { apply(base, [Op::Move.new(path("a"), [0])]) }
+    end
   end
 
   describe ".apply_immutable" do
