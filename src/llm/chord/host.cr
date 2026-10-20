@@ -229,45 +229,51 @@ module LLM::Chord
       @on_error.call(error)
     end
 
-    protected def code_version?(code_version : Int32) : Bool
-      code_version == @code_version
-    end
-
     protected def service(type_name : String) : Service?
-      @services[type_name]?
+      @current.services[type_name]? || @pending.try(&.services[type_name]?)
     end
 
-    protected def serve_into(service : Service) : Nil
+    protected def binding_service(type_name : String, candidate : Bool) : Service?
+      (candidate ? @pending.try(&.services[type_name]?) : nil) || service(type_name)
+    end
+
+    protected def serve_into(services : Hash(String, Service), service : Service) : Nil
       contract = service.contract
-      raise ArgumentError.new("#{contract.name} is already served") if @services.has_key?(contract.name)
+      raise ArgumentError.new("#{contract.name} is already served") if services.has_key?(contract.name)
       placement = contract.description.host
       if placement && !placement.placed_on?(@name)
         raise ArgumentError.new("#{contract.name} is declared for #{placement.text}, but #{@name} serves it")
       end
-      @services[contract.name] = service
+      services[contract.name] = service
     end
 
     protected def join_root(root_id : String, code_version : Int32, principal : JSON::Any? = nil,
                             signal : AbortSignal? = nil, from : Connection? = nil, &)
-      unless code_version?(code_version)
+      state = @code_versions[code_version]?
+      unless state
         @local.delete(root_id)
         raise ChordError.new(ErrorCode::Superseded, "code version #{code_version} is not retained by #{@name}")
       end
       if from && !@local.includes?(root_id)
         (@foreign[root_id] ||= ::Set(Connection).new) << from
       end
-      @roots[root_id] = (@roots[root_id]? || 0) + 1
-      ctx = Ctx.new(self, signal ? [signal] : [] of AbortSignal, root_id, code_version, principal || @principal)
+      state.roots[root_id] = (state.roots[root_id]? || 0) + 1
+      signals = signal ? [signal, state.abort.signal] : [state.abort.signal]
+      ctx = Ctx.new(self, signals, root_id, code_version, principal || @principal)
       begin
         yield ctx
       ensure
         ctx.close
-        count = (@roots[root_id]? || 1) - 1
+        count = (state.roots[root_id]? || 1) - 1
         if count > 0
-          @roots[root_id] = count
+          state.roots[root_id] = count
         else
-          @roots.delete(root_id)
-          end_root(root_id) unless @foreign.has_key?(root_id)
+          state.roots.delete(root_id)
+          unless @foreign.has_key?(root_id)
+            end_root(root_id)
+            maybe_retire
+            retirement_changed
+          end
         end
       end
     end
@@ -279,20 +285,24 @@ module LLM::Chord
     protected def foreign_root_ended(root_id : String, from : Connection) : Nil
       links = @foreign[root_id]?
       return unless links && links.delete(from) && links.empty?
-      if @roots.has_key?(root_id)
+      if @code_versions.values.any? { |state| state.roots.has_key?(root_id) }
         @foreign.delete(root_id)
       else
         end_root(root_id)
       end
     end
 
+    protected def touch(root_id : String, object : ObjectImpl) : Nil
+      (@touches[root_id] ||= ::Set(ObjectImpl).new) << object
+    end
+
     protected def acquire(type : Contract, input, principal : JSON::Any?, owner : RefOwner, from : ObjectImpl? = nil,
-                          state : Bool = true) : Ref
+                          state : Bool = true, candidate : Bool = false) : Ref
       raw = Chord.json_input(input)
       if elsewhere = elsewhere(type, raw)
         return acquire_remote(type, elsewhere[0], elsewhere[1], principal, owner, state)
       end
-      service = @services[type.name]? || raise unknown_type(type.name)
+      service = binding_service(type.name, candidate) || raise unknown_type(type.name)
       Chord.bind(service.contract, service.accepts, type)
       address, normalized, chosen = locate(service, raw, principal || @principal)
       placement = service.contract.description.host
@@ -303,7 +313,12 @@ module LLM::Chord
       if from && object && (object.same?(from) || Host.reaches?(object, from))
         raise Chord.invalid("cycle", "#{from.address} -> #{address} would create a ref cycle")
       end
-      object ||= create_object(service, type, address, normalized, chosen)
+      if object.nil?
+        if @gating && @gating.includes?(type.name)
+          raise ChordError.new(ErrorCode::UpgradeConflict, "#{type.name} is being upgraded; retry", reason: "gate")
+        end
+        object = create_object(service, type, address, normalized, chosen)
+      end
       ref = LocalRef.new(object, type, owner)
       object.add_ref(ref)
       ref
