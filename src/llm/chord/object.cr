@@ -69,12 +69,31 @@ module LLM::Chord
 
   record Installed, code_version : Int32, service : Service, implementation : Implementation, decls : Decls
 
-  record Gate, grandfathered : ::Set(String), queue : Array(Tuple(String, JSON::Any)), drained : Proc(Nil)
-
   record StagedListeners, activate : Proc(Nil), discard : Proc(Nil)
+
+  class Gate
+    getter grandfathered : ::Set(String)
+    getter queue = [] of Tuple(String, JSON::Any)
+    getter drained : Proc(Nil)
+
+    def initialize(@grandfathered : ::Set(String), @drained : Proc(Nil)); end
+  end
 
   private record Subscription, origin : AnyResource | Subscribable, select : (Proc(AnyResource, Subscribable))?,
     unsubscribe : Proc(Nil), buffer : Array(JSON::Any)?
+
+  private class FreshSubscription
+    getter origin : AnyResource | Subscribable
+    getter select : (Proc(AnyResource, Subscribable))?
+    property unsubscribe : Proc(Nil)
+    property buffer : Array(JSON::Any)?
+    property subscribe : Proc(Nil)?
+
+    def initialize(@origin : AnyResource | Subscribable, @select : (Proc(AnyResource, Subscribable))?)
+      @unsubscribe = -> { }
+      @buffer = [] of JSON::Any
+    end
+  end
 
   enum ObjectStatus
     Activating
