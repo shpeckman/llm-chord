@@ -260,7 +260,9 @@ module LLM::Chord
     property principal : JSON::Any
     getter restamp : Proc(JSON::Any, JSON::Any?)?
     getter generation = 0
-    getter peer_code_version : Int32? = nil
+    property peer_code_version : Int32? = nil
+    getter fenced_code_versions = ::Set(Int32).new
+    getter votes = {} of Int32 => Future(JSON::Any?)
     getter? synced : Bool
     getter remotes = {} of Int64 => RemoteBinding
     getter calls = {} of Int64 => Future(Frame)
@@ -270,6 +272,7 @@ module LLM::Chord
     getter relayed_calls = {} of Int64 => RelayCall
     @parent_name : String? = nil
     @sync_waiters = [] of Future(Nil)
+    @admitted = {} of String => Int32
     @next_id = 1_i64
     @last_seen : Time::Instant = Time.instant
     @max_calls : Int32?
