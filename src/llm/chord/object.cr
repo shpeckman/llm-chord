@@ -125,7 +125,7 @@ module LLM::Chord
     property deferred_runtime = false
     protected property service : Service? = nil
     protected getter pending = ::Set(Decls).new
-    @refs = ::Set(LocalRef).new
+    protected getter refs = ::Set(LocalRef).new
     protected getter open_order = [] of AnyResource
     @activation_abort = AbortController.new
     @subscriptions = {} of String => Subscription
