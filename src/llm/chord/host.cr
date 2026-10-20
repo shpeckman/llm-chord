@@ -189,7 +189,7 @@ module LLM::Chord
       @root_seq += 1
       root_id = "#{@name}##{@incarnation}:#{@root_seq}"
       @local << root_id
-      join_root(root_id, code_version || @code_version, principal.nil? ? nil : Chord.json_value(principal), signal) do |ctx|
+      join_root(root_id, code_version || @current.id, principal.nil? ? nil : Chord.json_value(principal), signal) do |ctx|
         yield ctx
       end
     end
