@@ -10,7 +10,7 @@ module LLM::Chord::Delta
       while k
         break if (tried += 1) > max_candidates
         n = tail.size - k
-        return n if n <= b.size && tail[k, n] == b[0, n]
+        return Utf16.size(b[0, n]) if n <= b.size && tail[k, n] == b[0, n]
         k = tail.index(head, k + 1)
       end
       break if head_len == 1

@@ -213,4 +213,59 @@ describe LLM::Chord do
       values.size.should eq 1
     end
   end
+
+  describe ".replicated_state (async)" do
+    it "delivers hydrate then updates in order on a fiber" do
+      state = LLM::Chord.replicated_state(JSON.parse(%({"n":0})), async: true)
+      done = Channel(Nil).new
+      seen = [] of Int64
+      state.subscribe do |value, _delivery|
+        seen << value["n"].as_i
+        done.send(nil)
+      end
+      done.receive
+      state.change { |draft| draft["n"] = 1 }
+      done.receive
+      seen.should eq [0_i64, 1_i64]
+    end
+
+    it "returns from change without waiting for a slow listener" do
+      state = LLM::Chord.replicated_state(JSON.parse(%({"n":0})), async: true)
+      entered = Channel(Nil).new
+      release = Channel(Nil).new
+      state.subscribe do |_value, delivery|
+        if delivery.kind == LLM::Chord::DeliveryKind::Hydrate
+          entered.send(nil)
+          release.receive
+        end
+      end
+      entered.receive
+      state.change { |draft| draft["n"] = 1 }
+      state.value["n"].as_i.should eq 1_i64
+      release.send(nil)
+    end
+
+    it "routes listener errors to on_error" do
+      errors = Channel(Exception).new
+      state = LLM::Chord.replicated_state(JSON.parse(%({"n":0})), ->(ex : Exception) { errors.send(ex) }, async: true)
+      state.subscribe do |_value, _delivery|
+        raise "boom"
+      end
+      errors.receive.message.should eq "boom"
+    end
+
+    it "stops delivery after unsubscribe" do
+      state = LLM::Chord.replicated_state(JSON.parse(%({"n":0})), async: true)
+      seen = [] of Int64
+      hydrated = Channel(Nil).new
+      unsub = state.subscribe do |value, _delivery|
+        seen << value["n"].as_i
+        hydrated.send(nil)
+      end
+      hydrated.receive
+      unsub.call
+      state.change { |draft| draft["n"] = 1 }
+      seen.should eq [0_i64]
+    end
+  end
 end

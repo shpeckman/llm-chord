@@ -1,6 +1,13 @@
 # spec/json_spec.cr
 require "./spec_helper"
 
+private struct Sample
+  include JSON::Serializable
+
+  property n : Int64
+  property s : String
+end
+
 describe LLM::Chord::Json do
   it "deep copies independently of the source" do
     original = JSON.parse(%({"a":[1,2],"b":{"c":"x"}}))
@@ -17,6 +24,16 @@ describe LLM::Chord::Json do
     LLM::Chord::Json.valid?(JSON::Any.new(0.0 / 0.0)).should be_false
   end
 
+  it "reports strictness" do
+    LLM::Chord::Json.strict?(JSON.parse(%({"a":1}))).should be_true
+    LLM::Chord::Json.strict?(JSON::Any.new(0.0 / 0.0)).should be_false
+  end
+
+  it "validates strict JSON with validate!" do
+    LLM::Chord::Json.validate!(JSON.parse(%({"a":1}))).should eq JSON.parse(%({"a":1}))
+    expect_raises(ArgumentError) { LLM::Chord::Json.validate!(JSON::Any.new(Float64::INFINITY)) }
+  end
+
   it "recognizes containers" do
     LLM::Chord::Json.container?(JSON.parse(%({"a":1}))).should be_true
     LLM::Chord::Json.container?(JSON.parse(%([1,2]))).should be_true
@@ -27,5 +44,13 @@ describe LLM::Chord::Json do
   it "converts Crystal values to JSON::Any" do
     LLM::Chord::Json.to_any({"a" => 1, "b" => [true, nil]}).should eq JSON.parse(%({"a":1,"b":[true,null]}))
     LLM::Chord::Json.to_any(42).raw.should eq 42_i64
+  end
+
+  it "materializes and converts JSON::Serializable structs" do
+    value = JSON.parse(%({"n":1,"s":"hi"}))
+    sample = LLM::Chord::Json.to_struct(Sample, value)
+    sample.n.should eq 1_i64
+    sample.s.should eq "hi"
+    LLM::Chord::Json.from_struct(sample).should eq value
   end
 end

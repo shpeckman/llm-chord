@@ -104,6 +104,14 @@ unsub.call
 `replicated_state(source)` attaches a publication-only view to an external
 authoritative stream (`ReplicatedStateSource`).
 
+Pass `async: true` to deliver to each subscriber on its own fiber instead of
+synchronously; listeners then never block the publishing fiber (per-subscriber
+backpressure is a bounded 100-frame channel):
+
+```crystal
+state = LLM::Chord.replicated_state(JSON.parse(%({"n":0})), async: true)
+```
+
 ## Operations
 
 | Verb | Struct          | Meaning                                      |
@@ -127,19 +135,27 @@ different tuples, and large edits may fold into a whole-root `r`.
 - `Prepared#base`, `#value`, `#ops`, `#base_revision`, `#abort`
 - `LLM::Chord::Delta.diff_revisions(before, after) : Array(Op)`
 - `LLM::Chord::Delta.apply(target, ops)`, `.apply_immutable(target, ops)`,
-  `.apply_immutable_batches(target, batches)`
+  `.apply_immutable_batches(target, batches)`, `.apply_immutable_shared(target, ops)`,
+  `.apply_immutable_batches_shared(target, batches)`
 - `LLM::Chord::Delta::Encoder#encode(ops)`, `LLM::Chord::Delta::Decoder#decode(wire)`
 - `LLM::Chord::Delta.overlap(a, b, scan, probe = 64, max_candidates = 8)`
 - `LLM::Chord::Json.deep_copy`, `LLM::Chord::Json.container?`, `LLM::Chord::Json.valid?`,
-  `LLM::Chord::Json.to_any`
+  `LLM::Chord::Json.strict?`, `LLM::Chord::Json.validate!`, `LLM::Chord::Json.to_any`,
+  `LLM::Chord::Json.to_struct(T, value)`, `LLM::Chord::Json.from_struct(value)`
 - Types: `Seg = String | Int32`, `Path = Array(Seg)`, `Op` (abstract) with
   `Op::Replace`, `Op::Set`, `Op::Delete`, `Op::Append`, `Op::Truncate`,
   `Op::Splice`, `Op::Move`; `Draft` (mutable draft wrapper over `JSON::Any`)
+- `Draft` (`Change#state`): `[]`, `[]?`, `[]=`, `<<`, `push`, `pop`, `shift`,
+  `unshift`, `splice`, `delete_at`, `delete`, `size`, `empty?`, `reverse!`,
+  `sort!`, typed accessors (`string?`, `int`, `float`, `bool`, `array`,
+  `object`), and `as_s/as_i/as_f/as_bool/as_a/as_h/null?`
 - Errors: `LLM::Chord::Delta::UnsafePathError`, `LLM::Chord::Delta::PathError`
-- `LLM::Chord.replicated_state(initial)` → `MutableReplicatedState`
+- `LLM::Chord.replicated_state(initial, on_error = nil, async = false)` → `MutableReplicatedState`
   (`#value`, `#subscribe`, `#change`, `#replace`)
-- `LLM::Chord.replicated_state(source)` → `AttachedReplicatedState`
+- `LLM::Chord.replicated_state(source, on_error = nil, async = false)` → `AttachedReplicatedState`
   (`#value`, `#subscribe`, `#activate`, `#dispose`)
+- `LLM::Chord::Cell.from(state, &compute)` → `Cell` (`#value`, `#subscribe`)
+- `LLM::Chord::Context` (`#provide`, `#require`, `#fetch`)
 - `LLM::Chord::Delivery` (`kind`, `sequence`), `LLM::Chord::DeliveryKind`,
   `LLM::Chord::ReplicatedStateSource`, `LLM::Chord::ReplicatedStateSourceAttachment`,
   `LLM::Chord::Snapshot`, `LLM::Chord::SourceFrame`
@@ -152,6 +168,15 @@ Run the specs and the linter:
 shards install
 crystal spec
 ameba
+```
+
+## Benchmarks
+
+Micro-benchmarks for the delta hot paths live in `bench/` (see `bench/README.md`).
+Run them in release mode:
+
+```console
+crystal run bench/bench.cr --release
 ```
 
 ## License

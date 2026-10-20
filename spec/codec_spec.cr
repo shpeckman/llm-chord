@@ -155,5 +155,17 @@ describe LLM::Chord::Delta::Encoder do
     it "rejects an empty path for a leaf op" do
       expect_raises(PathError) { Decoder.new.decode([JSON.parse(%(["s",[],1]))] of JSON::Any) }
     end
+
+    it "rejects a non-bijection move permutation" do
+      expect_raises(ArgumentError) { Decoder.new.decode([JSON.parse(%(["m",["a"],[1,1]]))] of JSON::Any) }
+    end
+
+    it "rejects a negative truncate count" do
+      expect_raises(ArgumentError) { Decoder.new.decode([JSON.parse(%(["t",["s"],-1]))] of JSON::Any) }
+    end
+
+    it "rejects a negative path id" do
+      expect_raises(ArgumentError) { Decoder.new.decode([JSON.parse(%(["#",-1,["a"]]))] of JSON::Any) }
+    end
   end
 end

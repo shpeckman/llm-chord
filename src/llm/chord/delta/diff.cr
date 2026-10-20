@@ -5,9 +5,10 @@ module LLM::Chord::Delta
   end
 
   class Diff
-    DEFAULT_OVERLAP_SCAN = 65_536
-    MAX_DELTA_OPERATIONS =  4_096
-    MAX_LCS_CELLS        = 65_536
+    DEFAULT_OVERLAP_SCAN    =  65_536
+    MAX_DELTA_OPERATIONS    =   4_096
+    MAX_LCS_CELLS           =  65_536
+    MAX_IDENTITY_CANDIDATES = 200_000
 
     @ops = [] of Op
     @overflowed = false
@@ -68,9 +69,10 @@ module LLM::Chord::Delta
         emit(Op::Set.new(path, JSON::Any.new(after)))
         return
       end
-      emit(Op::Truncate.new(path, before.size - shared))
-      if after.size > shared
-        emit(Op::Append.new(path, after[shared, after.size - shared]))
+      shared_chars = Utf16.chars_for_units(after, shared)
+      emit(Op::Truncate.new(path, Utf16.size(before) - shared))
+      if after.size > shared_chars
+        emit(Op::Append.new(path, after[shared_chars, after.size - shared_chars]))
       end
     end
 
@@ -138,6 +140,17 @@ module LLM::Chord::Delta
           return
         end
       end
+      if subsequence = subsequence_matches(before, after, before_start, before_end, after_start, after_end)
+        unless subsequence.empty?
+          process_array_matches(before, after, path, before_start, before_end, after_start, after_end, output_start, subsequence)
+          return
+        end
+      end
+      anchors = identity_anchors(before, after, before_start, before_end, after_start, after_end)
+      unless anchors.empty?
+        process_array_matches(before, after, path, before_start, before_end, after_start, after_end, output_start, anchors)
+        return
+      end
       if matches = lcs_matches(before[before_start...before_end], after[after_start...after_end])
         unless matches.empty?
           absolute = matches.map { |(before_index, after_index)| {before_start + before_index, after_start + after_index} }
@@ -170,6 +183,122 @@ module LLM::Chord::Delta
         after_at = after_match + 1
       end
       diff_array_region(before, after, path, before_at, before_end, after_at, after_end, output_at) unless @overflowed
+    end
+
+    private def subsequence_matches(
+      before : Array(JSON::Any), after : Array(JSON::Any),
+      before_start : Int32, before_end : Int32, after_start : Int32, after_end : Int32,
+    ) : Array({Int32, Int32})?
+      before_count = before_end - before_start
+      after_count = after_end - after_start
+      return if before_count == after_count
+      matches = [] of {Int32, Int32}
+      if after_count < before_count
+        before_index = before_start
+        (after_start...after_end).each do |after_index|
+          while before_index < before_end && before[before_index] != after[after_index]
+            before_index += 1
+          end
+          return if before_index == before_end
+          matches << {before_index, after_index}
+          before_index += 1
+        end
+        return matches
+      end
+      after_index = after_start
+      (before_start...before_end).each do |before_index|
+        while after_index < after_end && before[before_index] != after[after_index]
+          after_index += 1
+        end
+        return if after_index == after_end
+        matches << {before_index, after_index}
+        after_index += 1
+      end
+      matches
+    end
+
+    private def greedy_anchors(
+      positions : Hash(JSON::Any, Array(Int32)),
+      after : Array(JSON::Any), after_start : Int32, after_end : Int32,
+    ) : Array({Int32, Int32})
+      matches = [] of {Int32, Int32}
+      previous = -1
+      (after_start...after_end).each do |after_index|
+        candidates = positions[after[after_index]]?
+        next unless candidates
+        at = lower_bound(candidates, previous + 1)
+        next if at >= candidates.size
+        before_index = candidates[at]
+        matches << {before_index, after_index}
+        previous = before_index
+      end
+      matches
+    end
+
+    private def identity_anchors(
+      before : Array(JSON::Any), after : Array(JSON::Any),
+      before_start : Int32, before_end : Int32, after_start : Int32, after_end : Int32,
+    ) : Array({Int32, Int32})
+      positions = {} of JSON::Any => Array(Int32)
+      (before_start...before_end).each do |index|
+        value = before[index]
+        if positions.has_key?(value)
+          positions[value] << index
+        else
+          positions[value] = [index]
+        end
+      end
+      candidate_count = 0
+      (after_start...after_end).each do |index|
+        if indices = positions[after[index]]?
+          candidate_count += indices.size
+          return greedy_anchors(positions, after, after_start, after_end) if candidate_count > MAX_IDENTITY_CANDIDATES
+        end
+      end
+      return [] of {Int32, Int32} if candidate_count == 0
+
+      candidates = [] of Tuple(Int32, Int32, Int32)
+      tails = [] of Int32
+      tail_values = [] of Int32
+      (after_start...after_end).each do |after_index|
+        before_positions = positions[after[after_index]]?
+        next unless before_positions
+        (before_positions.size - 1).downto(0) do |idx|
+          before_index = before_positions[idx]
+          at = lower_bound(tail_values, before_index)
+          candidate_index = candidates.size
+          candidates << {before_index, after_index, at == 0 ? -1 : tails[at - 1]}
+          if at == tails.size
+            tails << candidate_index
+            tail_values << before_index
+          else
+            tails[at] = candidate_index
+            tail_values[at] = before_index
+          end
+        end
+      end
+      matches = [] of {Int32, Int32}
+      candidate_index = tails.empty? ? -1 : tails[-1]
+      while candidate_index >= 0
+        candidate = candidates[candidate_index]
+        matches << {candidate[0], candidate[1]}
+        candidate_index = candidate[2]
+      end
+      matches.reverse!
+    end
+
+    private def lower_bound(values : Array(Int32), value : Int32) : Int32
+      low = 0
+      high = values.size
+      while low < high
+        middle = (low + high) // 2
+        if values[middle] < value
+          low = middle + 1
+        else
+          high = middle
+        end
+      end
+      low
     end
 
     private def lcs_matches(before : Array(JSON::Any), after : Array(JSON::Any)) : Array({Int32, Int32})?

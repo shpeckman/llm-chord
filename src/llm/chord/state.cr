@@ -71,10 +71,49 @@ module LLM::Chord
     end
   end
 
+  private class AsyncSubscriber
+    @channel = Channel(Frame).new(100)
+
+    def initialize(@listener : StateListener, @hydrated_sequence : Int32, @on_error : Proc(Exception, Nil))
+      @closed = false
+      spawn { delivery_loop }
+    end
+
+    def push(frame : Frame) : Nil
+      return if @closed
+      @channel.send(frame)
+    end
+
+    def drain : Nil
+    end
+
+    def close : Nil
+      return if @closed
+      @closed = true
+      @channel.close
+    end
+
+    def hydrated_sequence : Int32
+      @hydrated_sequence
+    end
+
+    private def delivery_loop : Nil
+      loop do
+        frame = @channel.receive?
+        break if frame.nil? || @closed
+        begin
+          @listener.call(frame.value, frame.delivery)
+        rescue ex
+          @on_error.call(ex)
+        end
+      end
+    end
+  end
+
   private class Publisher
-    def initialize(@value : JSON::Any, @on_error : Proc(Exception, Nil))
+    def initialize(@value : JSON::Any, @on_error : Proc(Exception, Nil), @async : Bool = false)
       @sequence = 0
-      @subscribers = [] of Subscriber
+      @subscribers = [] of (Subscriber | AsyncSubscriber)
       @publications = Deque(Publication).new
       @delivering = false
     end
@@ -84,7 +123,7 @@ module LLM::Chord
     end
 
     def subscribe(listener : StateListener) : Proc(Nil)
-      subscriber = Subscriber.new(listener, @sequence, @on_error)
+      subscriber = @async ? AsyncSubscriber.new(listener, @sequence, @on_error) : Subscriber.new(listener, @sequence, @on_error)
       @subscribers << subscriber
       subscriber.push(Frame.new(@value, Delivery.new(DeliveryKind::Hydrate, @sequence)))
       subscriber.drain
@@ -125,10 +164,10 @@ module LLM::Chord
   end
 
   class MutableReplicatedState < ReplicatedState
-    def initialize(initial : JSON::Any, @on_error : Proc(Exception, Nil))
+    def initialize(initial : JSON::Any, @on_error : Proc(Exception, Nil), async : Bool = false)
       @tracker = Delta.track(initial)
       @changing = false
-      super(Publisher.new(@tracker.value, @on_error))
+      super(Publisher.new(@tracker.value, @on_error, async))
     end
 
     def change(&mutate : Delta::Draft -> Nil) : Nil
@@ -183,18 +222,18 @@ module LLM::Chord
   end
 
   class AttachedReplicatedState < ReplicatedState
-    def self.attach(source : ReplicatedStateSource, on_error : Proc(Exception, Nil)) : AttachedReplicatedState
+    def self.attach(source : ReplicatedStateSource, on_error : Proc(Exception, Nil), async : Bool = false) : AttachedReplicatedState
       attachment = source.attach
-      state = new(attachment, on_error)
+      state = new(attachment, on_error, async)
       state.activate
       state
     end
 
-    def initialize(@attachment : ReplicatedStateSourceAttachment, @on_error : Proc(Exception, Nil))
+    def initialize(@attachment : ReplicatedStateSourceAttachment, @on_error : Proc(Exception, Nil), async : Bool = false)
       snapshot = @attachment.snapshot
       @cursor = snapshot.cursor
       @disposed = false
-      super(Publisher.new(snapshot.value, @on_error))
+      super(Publisher.new(snapshot.value, @on_error, async))
     end
 
     def activate : Nil
@@ -233,11 +272,11 @@ module LLM::Chord
 
   RAISE_ON_ERROR = Proc(Exception, Nil).new { |ex| raise ex }
 
-  def self.replicated_state(initial : JSON::Any, on_error : Proc(Exception, Nil)? = nil) : MutableReplicatedState
-    MutableReplicatedState.new(initial, on_error || RAISE_ON_ERROR)
+  def self.replicated_state(initial : JSON::Any, on_error : Proc(Exception, Nil)? = nil, async : Bool = false) : MutableReplicatedState
+    MutableReplicatedState.new(initial, on_error || RAISE_ON_ERROR, async)
   end
 
-  def self.replicated_state(source : ReplicatedStateSource, on_error : Proc(Exception, Nil)? = nil) : AttachedReplicatedState
-    AttachedReplicatedState.attach(source, on_error || RAISE_ON_ERROR)
+  def self.replicated_state(source : ReplicatedStateSource, on_error : Proc(Exception, Nil)? = nil, async : Bool = false) : AttachedReplicatedState
+    AttachedReplicatedState.attach(source, on_error || RAISE_ON_ERROR, async)
   end
 end
