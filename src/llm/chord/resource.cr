@@ -59,6 +59,13 @@ module LLM::Chord
       order << self
     end
 
+    def adopt(version : Int32, exclusive : Bool, opener : Proc(AbortSignal, T), closer : Proc(T, Nil)?) : Nil
+      @version = version
+      @exclusive = exclusive
+      @opener = opener
+      @closer = closer
+    end
+
     def close(order : Array(AnyResource)) : Nil
       return unless @state.open?
       @state = ResourceState::Closed
