@@ -137,9 +137,9 @@ module LLM::Chord
     end
 
     private def listen(name : String, origin : AnyResource | Subscribable, source : Proc(Subscribable),
-                       select : (Proc(AnyResource, Subscribable))?, fn : ListenerFn) : Nil
+                       selector : (Proc(AnyResource, Subscribable))?, fn : ListenerFn) : Nil
       unique(@run.decls.listeners, "listener", name)
-      @run.decls.listeners[name] = ListenerDecl.new(origin, source, select, fn)
+      @run.decls.listeners[name] = ListenerDecl.new(origin, source, selector, fn)
     end
 
     private def listen_source(name : String, source : Subscribable, fn : ListenerFn) : Nil
