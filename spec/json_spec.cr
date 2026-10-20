@@ -1,56 +1,71 @@
 # spec/json_spec.cr
 require "./spec_helper"
 
-private struct Sample
-  include JSON::Serializable
-
-  property n : Int64
-  property s : String
-end
-
 describe LLM::Chord::Json do
-  it "deep copies independently of the source" do
-    original = JSON.parse(%({"a":[1,2],"b":{"c":"x"}}))
-    copy = LLM::Chord::Json.deep_copy(original)
+  it "deep-copies containers into independent trees" do
+    original = j(%({"a":[1,{"b":2}]}))
+    copy = Json.deep_copy(original)
     copy.should eq original
-    copy.as_h["a"].as_a << JSON::Any.new(3_i64)
-    original["a"].as_a.size.should eq 2
-    copy["a"].as_a.size.should eq 3
+    same?(copy["a"], original["a"]).should be_false
+    same?(copy["a"][1], original["a"][1]).should be_false
   end
 
-  it "validates finite numbers" do
-    LLM::Chord::Json.valid?(JSON.parse(%({"a":1}))).should be_true
-    LLM::Chord::Json.valid?(JSON::Any.new(Float64::INFINITY)).should be_false
-    LLM::Chord::Json.valid?(JSON::Any.new(0.0 / 0.0)).should be_false
+  it "copies strict JSON and rejects non-finite numbers" do
+    copy = Json.copy_json(j(%({"a":[1.5]})))
+    copy.should eq j(%({"a":[1.5]}))
+    bad = j(%({"a":[]}))
+    bad["a"].as_a << JSON::Any.new(Float64::NAN)
+    expect_raises(ArgumentError, /non-finite/) { Json.copy_json(bad) }
   end
 
-  it "reports strictness" do
-    LLM::Chord::Json.strict?(JSON.parse(%({"a":1}))).should be_true
-    LLM::Chord::Json.strict?(JSON::Any.new(0.0 / 0.0)).should be_false
+  it "distinguishes identity from structural equality" do
+    left = j(%({"a":1}))
+    right = j(%({"a":1}))
+    Json.identical?(left, left).should be_true
+    Json.identical?(left, right).should be_false
+    Json.equal?(left, right).should be_true
+    Json.identical?(JSON::Any.new("x"), JSON::Any.new("x")).should be_true
+    Json.identical?(JSON::Any.new(1_i64), JSON::Any.new(1.0)).should be_true
   end
 
-  it "validates strict JSON with validate!" do
-    LLM::Chord::Json.validate!(JSON.parse(%({"a":1}))).should eq JSON.parse(%({"a":1}))
-    expect_raises(ArgumentError) { LLM::Chord::Json.validate!(JSON::Any.new(Float64::INFINITY)) }
+  it "compares objects regardless of key order" do
+    Json.equal?(j(%({"a":1,"b":[1,{"c":2}]})), j(%({"b":[1,{"c":2}],"a":1}))).should be_true
+    Json.equal?(j(%({"a":1})), j(%({"a":1,"b":2}))).should be_false
+    Json.equal?(j("[1,2]"), j("[2,1]")).should be_false
+    Json.equal?(j("{}"), j("[]")).should be_false
   end
 
-  it "recognizes containers" do
-    LLM::Chord::Json.container?(JSON.parse(%({"a":1}))).should be_true
-    LLM::Chord::Json.container?(JSON.parse(%([1,2]))).should be_true
-    LLM::Chord::Json.container?(JSON.parse(%(1))).should be_false
-    LLM::Chord::Json.container?(JSON.parse(%(null))).should be_false
+  it "reports container kinds" do
+    Json.container?(j("{}")).should be_true
+    Json.container?(j("[]")).should be_true
+    Json.container?(j("1")).should be_false
   end
 
-  it "converts Crystal values to JSON::Any" do
-    LLM::Chord::Json.to_any({"a" => 1, "b" => [true, nil]}).should eq JSON.parse(%({"a":1,"b":[true,null]}))
-    LLM::Chord::Json.to_any(42).raw.should eq 42_i64
+  it "converts Crystal values to strict JSON" do
+    Json.to_any({"a" => [1, 2], "b" => nil}).should eq j(%({"a":[1,2],"b":null}))
+    expect_raises(ArgumentError) { Json.to_any(Float64::NAN) }
   end
 
-  it "materializes and converts JSON::Serializable structs" do
-    value = JSON.parse(%({"n":1,"s":"hi"}))
-    sample = LLM::Chord::Json.to_struct(Sample, value)
-    sample.n.should eq 1_i64
-    sample.s.should eq "hi"
-    LLM::Chord::Json.from_struct(sample).should eq value
+  it "round-trips serializable structs" do
+    value = Json.from_struct({name: "x", count: 2})
+    value.should eq j(%({"name":"x","count":2}))
+    Json.to_struct(Hash(String, Int32), j(%({"a":1}))).should eq({"a" => 1})
+  end
+
+  it "validates strict JSON" do
+    Json.valid?(j(%({"a":[1,"x",null,true]}))).should be_true
+    invalid = j("[]")
+    invalid.as_a << JSON::Any.new(Float64::INFINITY)
+    Json.valid?(invalid).should be_false
+    Json.strict?(invalid).should be_false
+    expect_raises(ArgumentError) { Json.validate!(invalid) }
+  end
+
+  it "renders JavaScript string coercions for default sorting" do
+    Json.js_string(j("null")).should eq "null"
+    Json.js_string(j("2.0")).should eq "2"
+    Json.js_string(j("1.5")).should eq "1.5"
+    Json.js_string(j(%([1,null,"a",[2,3]]))).should eq "1,,a,2,3"
+    Json.js_string(j("{}")).should eq "[object Object]"
   end
 end

@@ -1,171 +1,102 @@
 # spec/codec_spec.cr
 require "./spec_helper"
-include LLM::Chord::Delta
 
 describe LLM::Chord::Delta::Encoder do
-  describe "with Decoder" do
-    it "round-trips a batch through apply" do
-      ops = [
-        Op::Set.new(path("a"), JSON::Any.new("x")),
-        Op::Append.new(path("a"), "y"),
-        Op::Set.new(path("b"), JSON::Any.new(1_i64)),
-        Op::Set.new(path("a"), JSON::Any.new("z")),
-      ]
-      wire = Encoder.new.encode(ops)
-      decoded = Decoder.new.decode(wire)
-      base = JSON.parse(%({"a":"","b":0}))
-      apply_immutable(base, decoded).should eq apply_immutable(base, ops)
-    end
-
-    it "round-trips a batch beginning with a replacement" do
-      ops = [
-        Op::Replace.new(JSON.parse(%({"n":1}))),
-        Op::Set.new(path("n"), JSON::Any.new(2_i64)),
-      ]
-      wire = Encoder.new.encode(ops)
-      decoded = Decoder.new.decode(wire)
-      base = JSON.parse(%({"old":true}))
-      apply_immutable(base, decoded).should eq JSON.parse(%({"n":2}))
-    end
-
-    it "round-trips an empty batch" do
-      Decoder.new.decode(Encoder.new.encode([] of Op)).should be_empty
-    end
-
-    it "emits a path id on second use" do
-      ops = [
-        Op::Set.new(path("a"), JSON::Any.new(1_i64)),
-        Op::Set.new(path("b"), JSON::Any.new(2_i64)),
-        Op::Set.new(path("a"), JSON::Any.new(3_i64)),
-      ]
-      wire = Encoder.new.encode(ops)
-      wire.map(&.as_a.first.as_s).should eq ["s", "s", "#", "s"]
-    end
-
-    it "round-trips a path id through the decoder" do
-      ops = [
-        Op::Set.new(path("a"), JSON::Any.new(1_i64)),
-        Op::Set.new(path("b"), JSON::Any.new(2_i64)),
-        Op::Set.new(path("a"), JSON::Any.new(3_i64)),
-      ]
-      wire = Encoder.new.encode(ops)
-      decoded = Decoder.new.decode(wire)
-      base = JSON.parse(%({"a":0,"b":0}))
-      apply_immutable(base, decoded).should eq apply_immutable(base, ops)
-    end
-
-    it "round-trips a short-form delete" do
-      ops = [
-        Op::Set.new(path("a"), JSON::Any.new("x")),
-        Op::Delete.new(path("a")),
-      ]
-      wire = Encoder.new.encode(ops)
-      decoded = Decoder.new.decode(wire)
-      base = JSON.parse(%({"a":"old"}))
-      apply_immutable(base, decoded).should eq apply_immutable(base, ops)
-    end
-
-    it "round-trips a short-form truncate" do
-      ops = [
-        Op::Set.new(path("s"), JSON::Any.new("hello")),
-        Op::Truncate.new(path("s"), 2),
-      ]
-      wire = Encoder.new.encode(ops)
-      decoded = Decoder.new.decode(wire)
-      base = JSON.parse(%({"s":""}))
-      apply_immutable(base, decoded).should eq apply_immutable(base, ops)
-    end
-
-    it "round-trips a short-form splice" do
-      items = [JSON::Any.new("a"), JSON::Any.new("b")]
-      ops = [
-        Op::Splice.new(path("arr"), 0, 0, items),
-        Op::Splice.new(path("arr"), 0, 1, [] of JSON::Any),
-      ]
-      wire = Encoder.new.encode(ops)
-      decoded = Decoder.new.decode(wire)
-      base = JSON.parse(%({"arr":[]}))
-      apply_immutable(base, decoded).should eq apply_immutable(base, ops)
-    end
-
-    it "round-trips a short-form move" do
-      ops = [
-        Op::Move.new(path("arr"), [1, 0]),
-        Op::Move.new(path("arr"), [0, 1]),
-      ]
-      wire = Encoder.new.encode(ops)
-      decoded = Decoder.new.decode(wire)
-      base = JSON.parse(%({"arr":[1,2]}))
-      apply_immutable(base, decoded).should eq apply_immutable(base, ops)
-    end
-
-    it "re-emits a full path after a mid-batch replacement" do
-      ops = [
-        Op::Set.new(path("a"), JSON::Any.new(1_i64)),
-        Op::Replace.new(JSON.parse(%({"n":9}))),
-        Op::Set.new(path("a"), JSON::Any.new(2_i64)),
-      ]
-      wire = Encoder.new.encode(ops)
-      wire.map(&.as_a.first.as_s).should eq ["s", "r", "s"]
-      wire[2].as_a[1].should eq JSON.parse(%(["a"]))
-    end
+  it "interns paths, omits adjacent paths, and round-trips" do
+    encoder = Encoder.new
+    decoder = Decoder.new
+    first = ops(%([["t",["nested","text"],1],["a",["nested","text"],"x"]]))
+    tuples(decoder.decode(encoder.encode(first))).should eq tuples(first)
+    second = ops(%([["a",["nested","text"],"y"]]))
+    wire = encoder.encode(second)
+    JSON::Any.new(wire).should eq j(%([["#",0,["nested","text"]],["a",0,"y"]]))
+    tuples(decoder.decode(wire)).should eq tuples(second)
   end
 
-  describe "Decoder" do
-    it "rejects a non-array op" do
-      expect_raises(ArgumentError) { Decoder.new.decode([JSON::Any.new(1_i64)] of JSON::Any) }
-    end
+  it "resets path dictionaries on a base" do
+    encoder = Encoder.new
+    encoder.encode(ops(%([["s",["value"],1]])))
+    encoder.encode(ops(%([["s",["value"],2]])))
+    JSON::Any.new(encoder.encode(ops(%([["r",{"value":3}]])))).should eq j(%([["r",{"value":3}]]))
+    JSON::Any.new(encoder.encode(ops(%([["s",["value"],4]])))).should eq j(%([["s",["value"],4]]))
+  end
 
-    it "rejects an empty tuple" do
-      expect_raises(ArgumentError) { Decoder.new.decode([JSON.parse(%([]))] of JSON::Any) }
-    end
+  it "omits an adjacent repeated path" do
+    JSON::Any.new(Encoder.new.encode(ops(%([["s",["value"],1],["s",["value"],2]])))).should eq j(%([["s",["value"],1],["s",2]]))
+  end
 
-    it "rejects a malformed path-id entry" do
-      expect_raises(ArgumentError) { Decoder.new.decode([JSON.parse(%(["#",0]))] of JSON::Any) }
-    end
+  it "interns on second use rather than first" do
+    encoder = Encoder.new
+    JSON::Any.new(encoder.encode(ops(%([["a",["a","deep"],"1"]])))).should eq j(%([["a",["a","deep"],"1"]]))
+    JSON::Any.new(encoder.encode(ops(%([["a",["a","deep"],"2"]])))).should eq j(%([["#",0,["a","deep"]],["a",0,"2"]]))
+  end
 
-    it "rejects a replacement with wrong arity" do
-      expect_raises(ArgumentError) { Decoder.new.decode([JSON.parse(%(["r",1,2]))] of JSON::Any) }
-    end
+  it "does not collide paths containing null characters" do
+    operations = [Op::Set.new(path("a\u0000b"), JSON::Any.new(1_i64)), Op::Set.new(path("a", "b"), JSON::Any.new(2_i64))] of Op
+    tuples(Decoder.new.decode(Encoder.new.encode(operations))).should eq tuples(operations)
+  end
 
-    it "rejects an unknown verb" do
-      expect_raises(ArgumentError) { Decoder.new.decode([JSON.parse(%(["x",["a"],1]))] of JSON::Any) }
-    end
+  it "makes batches after a base self-contained" do
+    encoder = Encoder.new
+    encoder.encode(ops(%([["a",["a","deep"],"1"]])))
+    encoder.encode(ops(%([["a",["a","deep"],"2"]])))
+    base = encoder.encode(ops(%([["r",{"a":{"deep":"x"}}]])))
+    after = encoder.encode(ops(%([["a",["a","deep"],"3"]])))
+    JSON::Any.new(after).should eq j(%([["a",["a","deep"],"3"]]))
+    decoder = Decoder.new
+    tuples(decoder.decode(base)).should eq j(%([["r",{"a":{"deep":"x"}}]]))
+    tuples(decoder.decode(after)).should eq j(%([["a",["a","deep"],"3"]]))
+  end
 
-    it "rejects a non-array path" do
-      expect_raises(ArgumentError) { Decoder.new.decode([JSON.parse(%(["s","x",1]))] of JSON::Any) }
+  it "round-trips deterministic mixed operation streams" do
+    batches = (0...100).map do |index|
+      ops(%([["s",["rows",#{index},"value"],#{index}],["a",["output"],"#{index}"],["p",["tail"],#{index},0,[#{index}]]]))
     end
+    encoder = Encoder.new
+    decoder = Decoder.new
+    batches.each { |batch| tuples(decoder.decode(encoder.encode(batch))).should eq tuples(batch) }
+  end
 
-    it "rejects a bad path segment" do
-      expect_raises(ArgumentError) { Decoder.new.decode([JSON.parse(%(["s",[true],1]))] of JSON::Any) }
-    end
+  it "validates and encodes permutations" do
+    operations = ops(%([["m",["values"],[2,0,1]],["m",["values"],[1,2,0]]]))
+    wire = Encoder.new.encode(operations)
+    JSON::Any.new(wire).should eq j(%([["m",["values"],[2,0,1]],["m",[1,2,0]]]))
+    wire.each { |op| Delta.assert_valid_wire_op(op) }
+    tuples(Decoder.new.decode(wire)).should eq tuples(operations)
+  end
+end
 
-    it "rejects a non-integer arity argument" do
-      expect_raises(ArgumentError) { Decoder.new.decode([JSON.parse(%(["t",["a"],"x"]))] of JSON::Any) }
-    end
+describe LLM::Chord::Delta::Decoder do
+  it "rejects unresolved short forms and unsafe interned paths" do
+    expect_raises(PathError) { Decoder.new.decode(j(%([["a","x"]])).as_a) }
+    expect_raises(UnsafePathError) { Decoder.new.decode(j(%([["#",0,["__proto__"]],["s",0,true]])).as_a) }
+    expect_raises(UnsafePathError) { Decoder.new.decode(j(%([["#",0,["__proto__","w"]],["s",0,true]])).as_a) }
+  end
 
-    it "rejects an unknown path id" do
-      expect_raises(PathError) { Decoder.new.decode([JSON.parse(%(["s",7,1]))] of JSON::Any) }
-    end
+  it "clears ids on a base batch" do
+    decoder = Decoder.new
+    decoder.decode(j(%([["#",0,["a"]],["a",0,"1"]])).as_a)
+    decoder.decode(j(%([["r",{"a":""}]])).as_a)
+    expect_raises(PathError) { decoder.decode(j(%([["a",0,"2"]])).as_a) }
+  end
 
-    it "rejects a short form with no previous path" do
-      expect_raises(PathError) { Decoder.new.decode([JSON.parse(%(["d"]))] of JSON::Any) }
-    end
+  it "keeps path ids across batches" do
+    decoder = Decoder.new
+    decoder.decode(j(%([["#",3,["deep","path"]],["s",3,1]])).as_a)
+    tuples(decoder.decode(j(%([["s",3,2]])).as_a)).should eq j(%([["s",["deep","path"],2]]))
+  end
 
-    it "rejects an empty path for a leaf op" do
-      expect_raises(PathError) { Decoder.new.decode([JSON.parse(%(["s",[],1]))] of JSON::Any) }
-    end
+  it "rejects malformed tuples" do
+    expect_raises(ArgumentError) { Decoder.new.decode(j(%([["t",["value"],-1]])).as_a) }
+    expect_raises(ArgumentError) { Decoder.new.decode(j(%([["a",["value"],1]])).as_a) }
+    expect_raises(ArgumentError) { Decoder.new.decode(j(%([["s"]])).as_a) }
+    expect_raises(ArgumentError) { Decoder.new.decode(j(%([["m",["v"],[0,0]]])).as_a) }
+    expect_raises(ArgumentError) { Decoder.new.decode(j(%([["zz",["v"]]])).as_a) }
+    expect_raises(ArgumentError) { Decoder.new.decode(j(%([{"op":"s"}])).as_a) }
+    expect_raises(PathError) { Decoder.new.decode(j(%([["s",[],1]])).as_a) }
+  end
 
-    it "rejects a non-bijection move permutation" do
-      expect_raises(ArgumentError) { Decoder.new.decode([JSON.parse(%(["m",["a"],[1,1]]))] of JSON::Any) }
-    end
-
-    it "rejects a negative truncate count" do
-      expect_raises(ArgumentError) { Decoder.new.decode([JSON.parse(%(["t",["s"],-1]))] of JSON::Any) }
-    end
-
-    it "rejects a negative path id" do
-      expect_raises(ArgumentError) { Decoder.new.decode([JSON.parse(%(["#",-1,["a"]]))] of JSON::Any) }
-    end
+  it "decodes root splices and permutations with empty paths" do
+    tuples(Decoder.new.decode(j(%([["p",[],0,0,[1]],["m",[],[0]]])).as_a)).should eq j(%([["p",[],0,0,[1]],["m",[],[0]]]))
   end
 end

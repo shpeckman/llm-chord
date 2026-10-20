@@ -6,6 +6,11 @@ describe "LLM::Chord::Delta.overlap" do
     LLM::Chord::Delta.overlap("hello world", "world foo", 65_536).should eq 5
   end
 
+  it "finds bounded overlaps from upstream examples" do
+    LLM::Chord::Delta.overlap("abcdefgh", "defghxyz", 65_536).should eq 5
+    LLM::Chord::Delta.overlap("abcdef", "defghi", 0).should eq 0
+  end
+
   it "finds a full overlap" do
     LLM::Chord::Delta.overlap("abc", "abcd", 65_536).should eq 3
   end

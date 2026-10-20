@@ -5,7 +5,7 @@ require "benchmark"
 include LLM::Chord::Delta
 
 N = 10_000
-U =  1_000
+U = 10_000
 
 Benchmark.bm do |bm|
   bm.report("bulk unshift + prepare") do
@@ -30,9 +30,19 @@ Benchmark.bm do |bm|
     total
   end
 
+  bm.report("small edit in a large revision") do
+    rows = Array(JSON::Any).new(N) { |i| JSON.parse(%({"id":#{i},"text":"row"})) }
+    tracker = LLM::Chord::Delta.track(JSON::Any.new({"rows" => JSON::Any.new(rows)}))
+    100.times do |i|
+      change = tracker.begin_change
+      change.state["rows"][i]["text"] = "edited"
+      tracker.adopt(change.prepare)
+    end
+  end
+
   bm.report("immutable replay") do
     base = JSON.parse(%({"n":0}))
-    ops = [Op::Set.new(["n"] of Seg, JSON::Any.new(1_i64))]
+    ops = [Op::Set.new(["n"] of Seg, JSON::Any.new(1_i64))] of Op
     N.times { LLM::Chord::Delta.apply_immutable(base, ops) }
   end
 
