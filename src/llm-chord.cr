@@ -9,6 +9,8 @@ require "./llm/chord/delta/codec"
 require "./llm/chord/delta/draft"
 require "./llm/chord/delta/tracker"
 require "./llm/chord/state"
+require "./llm/chord/cell"
+require "./llm/chord/context"
 
 module LLM::Chord
 end
