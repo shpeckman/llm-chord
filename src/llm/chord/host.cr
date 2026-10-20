@@ -82,6 +82,7 @@ module LLM::Chord
     @retirement_watchers = ::Set(Proc(Nil)).new
     @deferred_hellos = {} of Connection => Int32
     @reload_waiters = [] of Proc(Nil)
+    @child_reloads : ChildReloads? = nil
     @retire_allowed = 0
     @origin_seq = 0
     @root_seq = 0_i64
@@ -109,8 +110,11 @@ module LLM::Chord
       @current = CodeVersionState.new(1, {} of String => Service, {} of String => RegistryTable,
         {} of String => Int32, AbortController.new)
       @code_versions[1] = @current
-      @child_reloads = ChildReloads.new(self)
       upstream.try { |link| connect(link.link, principal: link.principal, options: link.options) }
+    end
+
+    private def child_reloads : ChildReloads
+      @child_reloads ||= ChildReloads.new(self)
     end
 
     def code_version : Int32
@@ -556,7 +560,7 @@ module LLM::Chord
     end
 
     protected def on_reload_frame(connection : Connection, frame : Frame) : Nil
-      @child_reloads.handle(connection, frame)
+      child_reloads.handle(connection, frame)
     end
 
     protected def connection_closed(connection : Connection) : Nil
@@ -566,7 +570,7 @@ module LLM::Chord
       @root_links.each_value(&.delete(connection))
       if @upstream.same?(connection)
         @upstream = nil
-        @child_reloads.parent_lost
+        child_reloads.parent_lost
       end
     end
 
