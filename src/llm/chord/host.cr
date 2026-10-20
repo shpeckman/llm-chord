@@ -51,7 +51,7 @@ module LLM::Chord
     @facet_runs = {} of String => AbortController
     protected getter host_objects = {} of String => Ref
     protected getter code_versions = {} of Int32 => CodeVersionState
-    protected getter current : CodeVersionState
+    protected property current : CodeVersionState
     protected property previous : CodeVersionState? = nil
     protected property pending : CodeVersionState? = nil
     protected property gating : ::Set(String)? = nil
@@ -293,7 +293,7 @@ module LLM::Chord
       connection.send(Frame.build("retire", codeVersion: retired)) if retired > 0
     end
 
-    private def retire_implementation(object : ObjectImpl, code_version : Int32) : Nil
+    protected def retire_implementation(object : ObjectImpl, code_version : Int32) : Nil
       installed = object.implementations.delete(code_version)
       return if installed.nil? || installed.decls.same?(object.decls)
       kept = object.all_decls
