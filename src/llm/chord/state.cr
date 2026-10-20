@@ -164,10 +164,10 @@ module LLM::Chord
   end
 
   class MutableReplicatedState < ReplicatedState
-    def initialize(initial : JSON::Any, @on_error : Proc(Exception, Nil))
+    def initialize(initial : JSON::Any, @on_error : Proc(Exception, Nil), async : Bool = false)
       @tracker = Delta.track(initial)
       @changing = false
-      super(Publisher.new(@tracker.value, @on_error))
+      super(Publisher.new(@tracker.value, @on_error, async))
     end
 
     def change(&mutate : Delta::Draft -> Nil) : Nil
