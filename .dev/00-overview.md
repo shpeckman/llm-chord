@@ -5,16 +5,16 @@ Implementation plans for the gaps between `llm-chord` and `@earendil-works/chord
 sources: `packages/chord/src/delta/*` (TypeScript) and `src/llm/chord/**`
 (Crystal).
 
-| # | File | Gap | Priority | Depends on |
-|---|------|-----|----------|------------|
-| 01 | `01-diff-identity-anchors.md` | Richer array matching in `diff.cr` (batch compactness) | High | — |
-| 02 | `02-draft-array-mutators.md` | Array/object mutation surface on `Draft` | High | — |
-| 03 | `03-apply-copy-on-write.md` | Copy-on-write / structural-sharing applier (perf) | Medium (optional) | — |
-| 04 | `04-validation-and-codec.md` | Strict-JSON validator + op/wire-op shape validation | Medium | — |
-| 05 | `05-string-unit-semantics.md` | UTF-16 code-unit semantics for `t`/`a`/`overlap` | High (interop correctness) | — |
-| 06 | `06-type-safety.md` | Generic typed access over `JSON::Any` | Low (large redesign) | — |
-| 07 | `07-replicated-state-parity.md` | Expand `state.cr` toward chord's `state.ts` | Low (large, optional) | — |
-| 08 | `08-benchmarks.md` | Benchmark suite parity | Low | 01, 03 |
+| #  | File                            | Gap                                                    | Priority                   | Depends on |
+|----|---------------------------------|--------------------------------------------------------|----------------------------|------------|
+| 01 | `01-diff-identity-anchors.md`   | Richer array matching in `diff.cr` (batch compactness) | High                       | —          |
+| 02 | `02-draft-array-mutators.md`    | Array/object mutation surface on `Draft`               | High                       | —          |
+| 03 | `03-apply-copy-on-write.md`     | Copy-on-write / structural-sharing applier (perf)      | Medium (optional)          | —          |
+| 04 | `04-validation-and-codec.md`    | Strict-JSON validator + op/wire-op shape validation    | Medium                     | —          |
+| 05 | `05-string-unit-semantics.md`   | UTF-16 code-unit semantics for `t`/`a`/`overlap`       | High (interop correctness) | —          |
+| 06 | `06-type-safety.md`             | Generic typed access over `JSON::Any`                  | Low (large redesign)       | —          |
+| 07 | `07-replicated-state-parity.md` | Expand `state.cr` toward chord's `state.ts`            | Low (large, optional)      | —          |
+| 08 | `08-benchmarks.md`              | Benchmark suite parity                                 | Low                        | 01, 03     |
 
 ## Recommended order
 
