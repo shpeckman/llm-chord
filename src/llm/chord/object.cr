@@ -424,23 +424,83 @@ module LLM::Chord
       end
     end
 
-    private def start_runtime : Nil
-      start_listeners
+    protected def start_runtime : Nil
+      stage_listeners(@decls).activate.call
+      start_tasks
+    end
+
+    protected def stage_listeners(decls : Decls) : StagedListeners
+      fresh = {} of String => FreshSubscription
+      kept = ::Set(String).new
+      begin
+        decls.listeners.each do |key, decl|
+          previous = @subscriptions[key]?
+          if previous && previous.origin.same?(decl.origin) && ObjectImpl.same_select(previous.select, decl.select)
+            kept << key
+            next
+          end
+          source = decl.source.call
+          entry = FreshSubscription.new(decl.origin, decl.select)
+          fresh[key] = entry
+          if source.is_a?(Readable)
+            entry.buffer = nil
+            entry.subscribe = -> do
+              entry.unsubscribe = source.subscribe { |event| deliver(key, event) }
+              nil
+            end
+          else
+            entry.unsubscribe = source.subscribe do |event|
+              if buffer = entry.buffer
+                buffer << event
+              else
+                deliver(key, event)
+              end
+            end
+          end
+        end
+      rescue error
+        fresh.each_value(&.unsubscribe.call)
+        raise error
+      end
+      StagedListeners.new(
+        -> do
+          @subscriptions.each do |key, sub|
+            next if kept.includes?(key)
+            sub.unsubscribe.call
+            @subscriptions.delete(key)
+          end
+          fresh.each do |key, entry|
+            entry.subscribe.try(&.call)
+            @subscriptions[key] = Subscription.new(entry.origin, entry.select, entry.unsubscribe, entry.buffer)
+            buffered = entry.buffer || [] of JSON::Any
+            entry.buffer = nil
+            buffered.each { |event| deliver(key, event) }
+          end
+          nil
+        end,
+        -> do
+          fresh.each_value(&.unsubscribe.call)
+          nil
+        end,
+      )
+    end
+
+    protected def start_tasks : Nil
+      if @stopped.empty?
+        @decls.tasks.each_key { |key| start_task(key, @host.code_version) }
+      else
+        spawn { start_tasks_when_settled(@stopped.to_a) }
+      end
+    end
+
+    private def start_tasks_when_settled(stopped : Array(Future(Nil))) : Nil
+      stopped.each(&.await_settled)
+      return unless @status.live?
       @decls.tasks.each_key { |key| start_task(key, @host.code_version) }
     end
 
-    private def start_listeners : Nil
-      @decls.listeners.each do |key, decl|
-        source = decl.source.call
-        @subscriptions[key] = source.subscribe { |event| deliver(key, event) }
-      end
-    rescue error
-      stop_listeners
-      raise error
-    end
-
     private def stop_listeners : Nil
-      @subscriptions.each_value(&.call)
+      @subscriptions.each_value(&.unsubscribe.call)
       @subscriptions.clear
     end
 
@@ -475,7 +535,19 @@ module LLM::Chord
     end
 
     private def deliver(key : String, event : JSON::Any) : Nil
-      Publish.enqueue { invoke_listener(key, event) }
+      Publish.enqueue do
+        if gate = @gate
+          gate.queue << {key, event}
+          next
+        end
+        invoke_listener(key, event)
+      end
+    end
+
+    protected def open_gate : Nil
+      gate = @gate
+      @gate = nil
+      gate.try(&.queue).try &.each { |(key, event)| deliver(key, event) }
     end
 
     private def invoke_listener(key : String, event : JSON::Any) : Nil
@@ -494,6 +566,7 @@ module LLM::Chord
     end
 
     private def run_listener(decl : ListenerDecl, event : JSON::Any, root : Ctx) : Nil
+      lease(root)
       child = root.child(self)
       begin
         decl.fn.call(event, child)
@@ -502,9 +575,31 @@ module LLM::Chord
       end
     end
 
+    protected def lease(ctx : Ctx) : Nil
+      return if @leases.has_key?(ctx.root_id)
+      @leases[ctx.root_id] = ctx.code_version
+      @host.touch(ctx.root_id, self)
+    end
+
+    protected def root_ended(root_id : String) : Nil
+      @leases.delete(root_id)
+      return unless gate = @gate
+      gate.drained.call if gate.grandfathered.delete(root_id) && gate.grandfathered.empty?
+    end
+
     private def admit(ctx : Ctx) : Nil
-      return if @host.code_version?(ctx.code_version)
-      raise ChordError.new(ErrorCode::Superseded, "code version #{ctx.code_version} is retired")
+      if @host.failed
+        raise ChordError.new(ErrorCode::Unavailable, "#{@host.name} failed and admits no work", reason: "host_failed")
+      end
+      unless @host.has_code_version?(ctx.code_version)
+        raise ChordError.new(ErrorCode::Superseded, "code version #{ctx.code_version} is retired")
+      end
+      if ctx.code_version < @min_code_version
+        raise ChordError.new(ErrorCode::UpgradeConflict, "#{@address} was upgraded in code version #{@min_code_version}")
+      end
+      if gate = @gate
+        raise ChordError.new(ErrorCode::UpgradeConflict, "#{@address} is being upgraded") unless gate.grandfathered.includes?(ctx.root_id)
+      end
     end
 
     private def check_write(ctx : Ctx) : Nil
@@ -514,6 +609,10 @@ module LLM::Chord
       raise ChordError.new(ErrorCode::Gone, "#{@address} is disposed") if @status.disposed?
       return if ctx.root_id.starts_with?("task:")
       admit(ctx)
+    end
+
+    protected def self.same_select(a : (Proc(AnyResource, Subscribable))?, b : (Proc(AnyResource, Subscribable))?) : Bool
+      a.same?(b)
     end
 
     private def method_input(wanted : MemberDescription?, validated : MemberDescription?, name : String,
