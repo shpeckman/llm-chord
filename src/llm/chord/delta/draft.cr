@@ -150,5 +150,51 @@ module LLM::Chord::Delta
     def null? : Bool
       @value.raw.nil?
     end
+
+    def string?(key : String) : String?
+      raw = @value.raw
+      return nil unless raw.is_a?(Hash)
+      child = raw[key]?
+      return nil if child.nil?
+      child.raw.as?(String)
+    end
+
+    def int(key : String) : Int64
+      value = child_value(key)
+      raise Exception.new("Draft value is not an integer") unless value.is_a?(Int64)
+      value
+    end
+
+    def float(key : String) : Float64
+      value = child_value(key)
+      raise Exception.new("Draft value is not a float") unless value.is_a?(Float64)
+      value
+    end
+
+    def bool(key : String) : Bool
+      value = child_value(key)
+      raise Exception.new("Draft value is not a bool") unless value.is_a?(Bool)
+      value
+    end
+
+    def array(key : String) : Array(JSON::Any)
+      value = child_value(key)
+      raise Exception.new("Draft value is not an array") unless value.is_a?(Array)
+      value
+    end
+
+    def object(key : String) : Hash(String, JSON::Any)
+      value = child_value(key)
+      raise Exception.new("Draft value is not an object") unless value.is_a?(Hash)
+      value
+    end
+
+    private def child_value(key : String) : JSON::Any::Type
+      raw = @value.raw
+      raise Exception.new("Draft is not an object") unless raw.is_a?(Hash)
+      child = raw[key]?
+      raise Exception.new("Draft key is missing: #{key}") if child.nil?
+      child.raw
+    end
   end
 end

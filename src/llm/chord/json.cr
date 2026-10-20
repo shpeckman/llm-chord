@@ -27,6 +27,14 @@ module LLM::Chord
       JSON.parse(value.to_json)
     end
 
+    def self.to_struct(t : T.class, value : JSON::Any) : T forall T
+      T.from_json(value.to_json)
+    end
+
+    def self.from_struct(value) : JSON::Any
+      JSON.parse(value.to_json)
+    end
+
     def self.valid?(value : JSON::Any) : Bool
       case raw = value.raw
       when Float64
