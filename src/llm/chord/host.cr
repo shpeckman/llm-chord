@@ -343,16 +343,19 @@ module LLM::Chord
     end
 
     protected def registry_table(registry : AnyRegistry, ctx : Ctx?) : RegistryTable
-      if ctx && !code_version?(ctx.code_version)
-        raise ChordError.new(ErrorCode::Superseded, "code version #{ctx.code_version} is retired")
-      end
-      @tables[registry.name]? || EMPTY_TABLE
+      state = if ctx
+                @code_versions[ctx.code_version]? ||
+                  raise ChordError.new(ErrorCode::Superseded, "code version #{ctx.code_version} is retired")
+              else
+                @current
+              end
+      state.tables[registry.name]? || EMPTY_TABLE
     end
 
     protected def subscribe_registry(name : String, listener : TableListener) : Proc(Nil)
       listeners = @subscribers[name] ||= Listeners(TableListener).new
       id = listeners.add(listener)
-      listener.call(@tables[name]? || EMPTY_TABLE, @code_version)
+      listener.call(@current.tables[name]? || EMPTY_TABLE, @current.id)
       listeners.remover(id)
     end
 
@@ -366,39 +369,57 @@ module LLM::Chord
     protected def registries_changed(including : ObjectImpl? = nil) : Nil
       entries = live_decls.reject { |(object, _)| object.same?(including) }
       entries << {including, including.decls} if including
-      install_tables(build_tables(entries))
+      install_tables(@current, build_tables(entries))
     end
 
     protected def peer_hello(connection : Connection, code_version : Int32) : Nil
-      if code_version > @code_version
-        report(ChordError.new(ErrorCode::Invalid, "#{connection.name} runs code version #{code_version}, ahead of #{@code_version}"))
+      if code_version > @current.id
+        report(ChordError.new(ErrorCode::Invalid, "#{connection.name} runs code version #{code_version}, ahead of #{@current.id}"))
         connection.link.close("code version ahead of parent")
         return
       end
-      if code_version == @code_version
-        connection.mark_synced(code_version)
+      if @reloading
+        connection.peer_code_version = code_version
+        connection.fenced_code_versions << code_version if code_version < @current.id
+        @deferred_hellos[connection] = code_version
         return
       end
-      report(ChordError.new(ErrorCode::Unavailable,
-        "#{connection.name} runs code version #{code_version}, behind #{@code_version}; reconciling it needs reload"))
-      connection.link.close("code version behind parent")
+      if code_version == @current.id
+        connection.mark_synced(code_version)
+        announce_retired(connection)
+        return
+      end
+      connection.peer_code_version = code_version
+      connection.fenced_code_versions << code_version
+      spawn do
+        begin
+          Chord.reconcile_child(self, connection)
+        rescue error
+          report(error)
+          connection.link.close("reconciliation failed")
+        end
+      end
     end
 
     protected def allow_retire(code_version : Int32) : Nil
       @retire_allowed = Math.max(@retire_allowed, code_version)
+      maybe_retire
+      retirement_changed
     end
 
     protected def on_reload_frame(connection : Connection, frame : Frame) : Nil
-      return unless frame.t == "prepare"
-      error = ChordError.new(ErrorCode::Unavailable, "#{@name} cannot reload", reason: "reload_unsupported")
-      connection.send(Frame.build("vote", reload: frame.int("reload"), error: Wire.to_error(error)))
+      @child_reloads.handle(connection, frame)
     end
 
     protected def connection_closed(connection : Connection) : Nil
       @connections.delete(connection)
+      @deferred_hellos.delete(connection)
       @foreign.to_a.each { |(root_id, links)| foreign_root_ended(root_id, connection) if links.includes?(connection) }
       @root_links.each_value(&.delete(connection))
-      @upstream = nil if @upstream.same?(connection)
+      if @upstream.same?(connection)
+        @upstream = nil
+        @child_reloads.parent_lost
+      end
     end
 
     protected def binding_idle(binding : RemoteBinding) : Nil
