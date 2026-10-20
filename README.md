@@ -150,9 +150,9 @@ different tuples, and large edits may fold into a whole-root `r`.
   `sort!`, typed accessors (`string?`, `int`, `float`, `bool`, `array`,
   `object`), and `as_s/as_i/as_f/as_bool/as_a/as_h/null?`
 - Errors: `LLM::Chord::Delta::UnsafePathError`, `LLM::Chord::Delta::PathError`
-- `LLM::Chord.replicated_state(initial)` → `MutableReplicatedState`
+- `LLM::Chord.replicated_state(initial, on_error = nil, async = false)` → `MutableReplicatedState`
   (`#value`, `#subscribe`, `#change`, `#replace`)
-- `LLM::Chord.replicated_state(source)` → `AttachedReplicatedState`
+- `LLM::Chord.replicated_state(source, on_error = nil, async = false)` → `AttachedReplicatedState`
   (`#value`, `#subscribe`, `#activate`, `#dispose`)
 - `LLM::Chord::Cell.from(state, &compute)` → `Cell` (`#value`, `#subscribe`)
 - `LLM::Chord::Context` (`#provide`, `#require`, `#fetch`)
