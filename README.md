@@ -154,6 +154,15 @@ crystal spec
 ameba
 ```
 
+## Benchmarks
+
+Micro-benchmarks for the delta hot paths live in `bench/` (see `bench/README.md`).
+Run them in release mode:
+
+```console
+crystal run bench/bench.cr --release
+```
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
