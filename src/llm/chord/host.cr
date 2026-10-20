@@ -229,6 +229,122 @@ module LLM::Chord
       @on_error.call(error)
     end
 
+    def reload(facets : Enumerable(Facet), options : ReloadOptions = ReloadOptions.new) : ReloadReport
+      if !@kind.client? && !@upstream.nil?
+        raise ChordError.new(ErrorCode::Unavailable, "reloads are coordinated by the server", reason: "not_coordinator")
+      end
+      children = @connections.any? { |c| c.role.downstream? && c.peer.kind.host? }
+      if children || !options.remote.nil? || !options.remote_remove.nil?
+        Chord.run_cluster_reload(self, facets.to_a, options)
+      else
+        Chord.run_reload(self, facets.to_a, options)
+      end
+    end
+
+    protected def remember_remote_modules(remote : Hash(String, Array(String))?, remove : Hash(String, Array(String))?) : Nil
+      prefixes = ::Set(String).new
+      remote.try &.each_key { |prefix| prefixes << prefix }
+      remove.try &.each_key { |prefix| prefixes << prefix }
+      prefixes.each do |prefix|
+        modules = remote.try(&.[prefix]?) || [] of String
+        removed = remove.try(&.[prefix]?) || [] of String
+        merged = (@remote_modules[prefix]? || [] of String).to_set
+        modules.each { |m| merged << m }
+        @remote_modules[prefix] = merged.to_a.reject { |m| removed.includes?(m) }
+        removed_merged = (@remote_removed[prefix]? || [] of String).to_set
+        removed.each { |m| removed_merged << m }
+        @remote_removed[prefix] = removed_merged.to_a.reject { |m| modules.includes?(m) }
+      end
+    end
+
+    protected def retirable? : Bool
+      previous = @previous
+      return false if previous.nil? || !previous.roots.empty?
+      @kind.client? || @upstream.nil? || previous.id <= @retire_allowed
+    end
+
+    protected def retire : Nil
+      previous = @previous
+      return unless previous
+      @previous = nil
+      @code_versions.delete(previous.id)
+      @objects.values.each { |object| retire_implementation(object, previous.id) }
+      @connections.each do |connection|
+        connection.send(Frame.build("retire", codeVersion: previous.id)) if connection.role.downstream? && connection.peer.kind.host?
+      end
+      retirement_changed
+    end
+
+    private def maybe_retire : Nil
+      retire if retirable?
+    end
+
+    protected def watch_retirement(&watcher : ->) : Proc(Nil)
+      @retirement_watchers << watcher
+      -> { @retirement_watchers.delete(watcher); nil }
+    end
+
+    private def retirement_changed : Nil
+      @retirement_watchers.to_a.each(&.call)
+    end
+
+    protected def announce_retired(connection : Connection) : Nil
+      retired = (@previous || @current).id - 1
+      connection.send(Frame.build("retire", codeVersion: retired)) if retired > 0
+    end
+
+    private def retire_implementation(object : ObjectImpl, code_version : Int32) : Nil
+      installed = object.implementations.delete(code_version)
+      return if installed.nil? || installed.decls.same?(object.decls)
+      kept = object.all_decls
+      refs = ::Set(Ref).new
+      resources = ::Set(AnyResource).new
+      derives = ::Set(Derived).new
+      kept.each do |decls|
+        decls.refs.each_value { |ref| refs << ref }
+        decls.resources.each_value { |resource| resources << resource }
+        decls.derives.each_value { |derived| derives << derived }
+      end
+      installed.decls.derives.each_value { |derived| derived.detach unless derives.includes?(derived) }
+      closing = installed.decls.resources.values.reject { |resource| resources.includes?(resource) }
+        .sort_by { |resource| -(object.open_order.index(resource) || -1) }
+      releasing = installed.decls.refs.values.reject { |ref| refs.includes?(ref) }
+      object.refresh_schemas
+      steps = [] of Proc(Nil)
+      closing.each { |resource| steps << -> { resource.close(object.open_order) } }
+      releasing.each { |ref| steps << -> { ref.release } }
+      begin
+        Chord.run_all(steps, "#{object.address}: retiring code version #{code_version} failed")
+      rescue error
+        report(error)
+      end
+    end
+
+    protected def fail(error : Exception) : Nil
+      @failed ||= error
+      report(error)
+    end
+
+    protected def reload_ended : Nil
+      @reloading = false
+      deferred = @deferred_hellos.to_a
+      @deferred_hellos.clear
+      deferred.each { |(connection, version)| peer_hello(connection, version) if connection.open? }
+      @reload_waiters.each(&.call)
+      @reload_waiters.clear
+      maybe_retire
+    end
+
+    protected def when_reload_ended : Future(Nil)
+      future = Future(Nil).new
+      unless @reloading
+        future.resolve(nil)
+        return future
+      end
+      @reload_waiters << -> { future.resolve(nil); nil }
+      future
+    end
+
     protected def service(type_name : String) : Service?
       @current.services[type_name]? || @pending.try(&.services[type_name]?)
     end
