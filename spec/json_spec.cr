@@ -45,4 +45,12 @@ describe LLM::Chord::Json do
     LLM::Chord::Json.to_any({"a" => 1, "b" => [true, nil]}).should eq JSON.parse(%({"a":1,"b":[true,null]}))
     LLM::Chord::Json.to_any(42).raw.should eq 42_i64
   end
+
+  it "materializes and converts JSON::Serializable structs" do
+    value = JSON.parse(%({"n":1,"s":"hi"}))
+    sample = LLM::Chord::Json.to_struct(Sample, value)
+    sample.n.should eq 1_i64
+    sample.s.should eq "hi"
+    LLM::Chord::Json.from_struct(sample).should eq value
+  end
 end
