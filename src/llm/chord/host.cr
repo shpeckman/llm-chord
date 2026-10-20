@@ -45,20 +45,20 @@ module LLM::Chord
     getter upstream : Connection? = nil
     protected property in_factory = 0
     protected getter source_options : SourceOptions { SourceOptions.new(@dev, ->(error : Exception) { report(error) }) }
-    @objects = {} of String => ObjectImpl
+    protected getter objects = {} of String => ObjectImpl
     @dying = {} of String => ObjectImpl
-    @facets = {} of String => Facet
+    protected getter facets = {} of String => Facet
     @facet_runs = {} of String => AbortController
-    @host_objects = {} of String => Ref
-    @code_versions = {} of Int32 => CodeVersionState
-    @current : CodeVersionState
-    @previous : CodeVersionState? = nil
-    @pending : CodeVersionState? = nil
-    @gating : ::Set(String)? = nil
-    @reloading = false
-    @remote_modules = {} of String => Array(String)
-    @remote_removed = {} of String => Array(String)
-    @failed : Exception? = nil
+    protected getter host_objects = {} of String => Ref
+    protected getter code_versions = {} of Int32 => CodeVersionState
+    protected getter current : CodeVersionState
+    protected property previous : CodeVersionState? = nil
+    protected property pending : CodeVersionState? = nil
+    protected property gating : ::Set(String)? = nil
+    protected property reloading = false
+    protected property remote_modules = {} of String => Array(String)
+    protected property remote_removed = {} of String => Array(String)
+    protected getter failed : Exception? = nil
     @order = {} of String => Hash(String, Int32)
     @subscribers = {} of String => Listeners(TableListener)
     @bindings = {} of String => RemoteBinding
@@ -324,12 +324,12 @@ module LLM::Chord
       ref
     end
 
-    protected def address_of(type : Contract, input, principal : JSON::Any) : String
+    protected def address_of(type : Contract, input, principal : JSON::Any, candidate : Bool = false) : String
       raw = Chord.json_input(input)
       if elsewhere = elsewhere(type, raw)
         return remote_key(type, elsewhere[1], principal)
       end
-      service = @services[type.name]? || raise unknown_type(type.name)
+      service = binding_service(type.name, candidate) || raise unknown_type(type.name)
       locate(service, raw, principal)[0]
     end
 
