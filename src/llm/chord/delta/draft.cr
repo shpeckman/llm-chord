@@ -65,7 +65,9 @@ module LLM::Chord::Delta
     def unshift(*values) : Int32
       raw = @value.raw
       raise Exception.new("Draft is not an array") unless raw.is_a?(Array)
-      raw[0, 0] = values.map { |value| Json.to_any(value) }
+      items = [] of JSON::Any
+      values.each { |value| items << Json.to_any(value) }
+      raw[0, 0] = items
       raw.size
     end
 
@@ -73,7 +75,9 @@ module LLM::Chord::Delta
       raw = @value.raw
       raise Exception.new("Draft is not an array") unless raw.is_a?(Array)
       removed = raw[index, remove]
-      raw[index, remove] = items.map { |item| Json.to_any(item) }
+      converted = [] of JSON::Any
+      items.each { |item| converted << Json.to_any(item) }
+      raw[index, remove] = converted
       removed
     end
 
