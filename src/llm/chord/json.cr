@@ -39,5 +39,14 @@ module LLM::Chord
         true
       end
     end
+
+    def self.strict?(value : JSON::Any) : Bool
+      valid?(value)
+    end
+
+    def self.validate!(value : JSON::Any) : JSON::Any
+      raise ArgumentError.new("Replicated state values must be strict JSON") unless valid?(value)
+      value
+    end
   end
 end
