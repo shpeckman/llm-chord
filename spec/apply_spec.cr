@@ -93,6 +93,11 @@ describe LLM::Chord::Delta do
       expect_raises(PathError) { apply(base, [Op::Move.new([] of Seg, [1, 0])]) }
     end
 
+    it "rejects a move with a non-bijection permutation" do
+      base = JSON.parse(%([0,1]))
+      expect_raises(ArgumentError) { apply(base, [Op::Move.new([] of Seg, [1, 1])]) }
+    end
+
     it "rejects a splice on a non-array" do
       base = JSON.parse(%({"a":1}))
       expect_raises(PathError) { apply(base, [Op::Splice.new(path("a"), 0, 0, [] of JSON::Any)]) }

@@ -17,6 +17,16 @@ describe LLM::Chord::Json do
     LLM::Chord::Json.valid?(JSON::Any.new(0.0 / 0.0)).should be_false
   end
 
+  it "reports strictness" do
+    LLM::Chord::Json.strict?(JSON.parse(%({"a":1}))).should be_true
+    LLM::Chord::Json.strict?(JSON::Any.new(0.0 / 0.0)).should be_false
+  end
+
+  it "validates strict JSON with validate!" do
+    LLM::Chord::Json.validate!(JSON.parse(%({"a":1}))).should eq JSON.parse(%({"a":1}))
+    expect_raises(ArgumentError) { LLM::Chord::Json.validate!(JSON::Any.new(Float64::INFINITY)) }
+  end
+
   it "recognizes containers" do
     LLM::Chord::Json.container?(JSON.parse(%({"a":1}))).should be_true
     LLM::Chord::Json.container?(JSON.parse(%([1,2]))).should be_true
