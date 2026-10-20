@@ -25,7 +25,7 @@ module LLM::Chord
     def update(value : JSON::Any) : Nil
       return if value == @value
       @value = value
-      @listeners.each { |listener| listener.call(value) }
+      @listeners.each(&.call(value))
     end
   end
 end
