@@ -136,25 +136,30 @@ module LLM::Chord
       derived
     end
 
-    private def listen(name : String, origin : AnyResource | Subscribable, source : Proc(Subscribable), fn : ListenerFn) : Nil
+    private def listen(name : String, origin : AnyResource | Subscribable, source : Proc(Subscribable),
+                       select : (Proc(AnyResource, Subscribable))?, fn : ListenerFn) : Nil
       unique(@run.decls.listeners, "listener", name)
-      @run.decls.listeners[name] = ListenerDecl.new(origin, source, fn)
+      @run.decls.listeners[name] = ListenerDecl.new(origin, source, select, fn)
     end
 
     private def listen_source(name : String, source : Subscribable, fn : ListenerFn) : Nil
-      listen(name, source, -> { source.as(Subscribable) }, fn)
+      listen(name, source, -> { source.as(Subscribable) }, nil, fn)
     end
 
     private def listen_resource(name : String, resource : AnyResource, fn : ListenerFn) : Nil
-      listen(name, resource, -> { resource.subscribable }, fn)
+      listen(name, resource, -> { resource.subscribable }, nil, fn)
     end
 
     private def listen_selected(name : String, resource : Resource(T), selector : Proc(T, U), fn : ListenerFn) : Nil forall T, U
-      listen(name, resource, -> { selector.call(resource.open_value).as(Subscribable) }, fn)
+      listen(name, resource, -> { selector.call(resource.open_value).as(Subscribable) }, ObjectScope.select_fn(selector), fn)
     end
 
     protected def self.init_fn(init : Proc(Ctx, T)) : InitFn forall T
       ->(ctx : Ctx) { Chord.json_value(init.call(ctx)) }
+    end
+
+    protected def self.select_fn(selector : Proc(T, U)) : Proc(AnyResource, Subscribable) forall T, U
+      ->(value : AnyResource) { selector.call(value.as(T)).as(Subscribable) }
     end
 
     protected def self.derive_fn(fn : Proc(Array(JSON::Any), T)) : Proc(Array(JSON::Any), JSON::Any) forall T
