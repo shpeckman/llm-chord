@@ -181,15 +181,24 @@ module LLM::Chord::Delta
       when "a"
         Op::Append.new(path, (short ? arr[1] : arr[2]).as_s)
       when "t"
-        Op::Truncate.new(path, int(short ? arr[1] : arr[2]))
+        count = int(short ? arr[1] : arr[2])
+        raise ArgumentError.new("t count") if count < 0
+        Op::Truncate.new(path, count)
       when "p"
         if short
-          Op::Splice.new(path, int(arr[1]), int(arr[2]), arr[3].raw.as(Array(JSON::Any)))
+          index = int(arr[1])
+          remove = int(arr[2])
+          raise ArgumentError.new("p index") if index < 0 || remove < 0
+          Op::Splice.new(path, index, remove, arr[3].raw.as(Array(JSON::Any)))
         else
-          Op::Splice.new(path, int(arr[2]), int(arr[3]), arr[4].raw.as(Array(JSON::Any)))
+          index = int(arr[2])
+          remove = int(arr[3])
+          raise ArgumentError.new("p index") if index < 0 || remove < 0
+          Op::Splice.new(path, index, remove, arr[4].raw.as(Array(JSON::Any)))
         end
       when "m"
         perm = (short ? arr[1] : arr[2]).raw.as(Array(JSON::Any)).map { |value| int(value) }
+        LLM::Chord::Delta.assert_permutation(perm)
         Op::Move.new(path, perm)
       else
         raise ArgumentError.new("unknown op verb: #{verb}")
