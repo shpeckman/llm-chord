@@ -118,21 +118,21 @@ describe LLM::Chord::Delta do
     it "does not alias a replacement payload" do
       payload = JSON.parse(%({"n":0}))
       result = apply_immutable(JSON.parse(%({"old":true})), [Op::Replace.new(payload)])
-      payload["n"] = JSON::Any.new(1_i64)
+      payload.as_h["n"] = JSON::Any.new(1_i64)
       result["n"].as_i.should eq 0_i64
     end
 
     it "does not alias a set payload" do
       payload = JSON.parse(%({"n":0}))
       result = apply_immutable(JSON.parse(%({"a":0})), [Op::Set.new(path("a"), payload)])
-      payload["n"] = JSON::Any.new(1_i64)
+      payload.as_h["n"] = JSON::Any.new(1_i64)
       result["a"]["n"].as_i.should eq 0_i64
     end
 
     it "does not alias a splice payload" do
       items = [JSON.parse(%({"n":0}))]
       result = apply_immutable(JSON.parse(%({"arr":[]})), [Op::Splice.new(path("arr"), 0, 0, items)])
-      items[0]["n"] = JSON::Any.new(1_i64)
+      items[0].as_h["n"] = JSON::Any.new(1_i64)
       result["arr"].as_a[0]["n"].as_i.should eq 0_i64
     end
   end
