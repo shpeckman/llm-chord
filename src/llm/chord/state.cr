@@ -71,6 +71,45 @@ module LLM::Chord
     end
   end
 
+  private class AsyncSubscriber
+    @channel = Channel(Frame).new(100)
+
+    def initialize(@listener : StateListener, @hydrated_sequence : Int32, @on_error : Proc(Exception, Nil))
+      @closed = false
+      spawn { delivery_loop }
+    end
+
+    def push(frame : Frame) : Nil
+      return if @closed
+      @channel.send(frame)
+    end
+
+    def drain : Nil
+    end
+
+    def close : Nil
+      return if @closed
+      @closed = true
+      @channel.close
+    end
+
+    def hydrated_sequence : Int32
+      @hydrated_sequence
+    end
+
+    private def delivery_loop : Nil
+      loop do
+        frame = @channel.receive?
+        break if frame.nil? || @closed
+        begin
+          @listener.call(frame.value, frame.delivery)
+        rescue ex
+          @on_error.call(ex)
+        end
+      end
+    end
+  end
+
   private class Publisher
     def initialize(@value : JSON::Any, @on_error : Proc(Exception, Nil))
       @sequence = 0
