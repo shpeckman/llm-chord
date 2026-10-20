@@ -19,7 +19,7 @@ module LLM::Chord
   class FacetApi
     getter signal : AbortSignal
 
-    def initialize(@host : Host, @facet : String, @signal : AbortSignal, @added : Array(Service)); end
+    def initialize(@host : Host, @facet : String, @signal : AbortSignal, @serve : Proc(Service, Nil)); end
 
     def name : String
       @host.name
@@ -27,9 +27,7 @@ module LLM::Chord
 
     def serve(contract : Contract, *, lifetime : Lifetime = Lifetime::Referenced, linger : Time::Span? = nil,
               accepts : Accepts? = nil, &factory : JSON::Any, JSON::Any, ObjectScope -> Implementation) : Nil
-      service = Service.new(contract, factory, lifetime, linger, accepts, @facet)
-      @host.serve_into(service)
-      @added << service
+      @serve.call(Service.new(contract, factory, lifetime, linger, accepts, @facet))
     end
 
     def root(principal = nil, signal : AbortSignal? = nil, &)
