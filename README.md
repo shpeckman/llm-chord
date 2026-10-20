@@ -25,9 +25,16 @@ The port currently covers chord's foundation layer:
   derivations, resources, listeners and tasks; references with variants,
   late binding and `accepts` adapters; roots and call contexts; lifetimes and
   linger; principals; facets; registries.
+- Links — chord's wire protocol (version 4) between hosts: memory, IPC (Node's
+  IPC channel format) and WebSocket links; remote references with shared
+  bindings, units, flow control and consumer-side linger; relays and routes;
+  principal stamping; packed payloads.
+- `LLM::Chord::HostManager` — child host processes: the fork driver (process
+  groups, an IPC channel on `NODE_CHANNEL_FD`), the manager, the child's
+  control channel, and the kernel `process_lock`.
 
-Links, relays, reload, cluster management, and SQLite are not ported yet; see
-[ROADMAP.md](ROADMAP.md). Values are Crystal's `JSON::Any`.
+Reload and SQLite are not ported yet; see [ROADMAP.md](ROADMAP.md). Values are
+Crystal's `JSON::Any`.
 
 ## Requirements
 
@@ -401,7 +408,8 @@ host.close
 
 ### Hosts
 
-`C.create_host(**options)` is `Host.new(**options)`:
+`C.create_host(**options)` is `Host.new(**options)` (a macro, so symbols such
+as `kind: :client` still autocast):
 
 | Option | Meaning |
 | --- | --- |
@@ -411,6 +419,9 @@ host.close
 | `dev` | Validates every cell write, and every value exposed as a remote state member, against its schemas. |
 | `on_error` | Receives errors from background work (disposal, listeners, tasks, host objects). Default: printed to `STDERR`. |
 | `ready_timeout` | How long an activation waits for its references to be ready and hydrated, and an awaited `get` for its reference (`unavailable/ready_timeout`). Default 60 s; `nil` waits forever. |
+| `kind` | `:host` (default) or `:client` (a browser: never carries roots). |
+| `upstream` | The link to the parent: `C.upstream(link, principal: ..., **link_options)`. Also `connect` later. |
+| `linger`, `linger_cap` | Consumer-side linger of remote references: `{type_name => Time::Span}`; at most `linger_cap` (default 4) bindings linger. |
 
 Principals and inputs are anything that serializes to JSON (named tuples,
 hashes, strings, `JSON::Any`).
@@ -422,11 +433,11 @@ hashes, strings, `JSON::Any`).
   A referenced object is disposed when its last reference is released, after
   `linger`. `accepts` maps older consumer versions to adapters
   (`Proc(Implementation, Implementation)`).
-- `get(type, input = nil, principal: nil, signal: nil)` blocks until the
+- `get(type, input = nil, principal: nil, signal: nil, state: true)` blocks until the
   reference is ready (live, with its state members hydrated) and returns it.
   It raises the activation error, `aborted`, or `unavailable/ready_timeout`,
   and releases the reference then. `hold` returns the reference at once, maybe
-  still `loading`.
+  still `loading`. `state: false` makes a remote reference method-only.
 - `root(principal: nil, signal: nil) { |ctx| ... }` runs a call tree and
   returns the block's value. References taken with `ctx.get` are released when
   the root ends.
@@ -436,7 +447,8 @@ hashes, strings, `JSON::Any`).
 - `invalidate_principal { |principal| bool }` or `invalidate_principal(pattern)`
   force-disposes the objects of matching principals (never the host's own);
   a pattern matches principals whose listed fields are deep-equal.
-- `close` disposes every object, holders before what they hold.
+- `close` disposes every object, holders before what they hold, then closes
+  the links.
 
 ### Factories
 
@@ -528,6 +540,104 @@ when the facet is removed or the host closes). `define_registry(V, name,
 conflict: :error)` refuses two objects registering one key; `:last` keeps the
 later one. `RegistryView` has `table(ctx = nil)`, `get(key, ctx = nil)` and
 `subscribe { |table, code_version| }`; tables keep registration order.
+
+## Links
+
+A link is an ordered frame channel between two hosts. A remote type's placement
+decides where its objects live; a reference to one on another host is a
+`RemoteRef`, a view onto the host's shared binding for that object.
+
+```crystal
+server = C.create_host(self: {kind: "host"}, name: "server")
+server.serve(Board) { |_input, principal, scope| ... }
+
+down, up = C.memory_link_pair
+server.accept(down, principal: {guest: "g1"})
+browser = C.create_host(self: {kind: "host"}, name: "browser", kind: :client,
+  upstream: C.upstream(up, principal: {kind: "server"}))
+
+board = browser.get(Board)
+board.call("add", "hello")
+board.state("notes").subscribe { |notes| puts notes }
+```
+
+- `accept(link, principal:, kind: :client, name: nil, restamp: nil, max_calls: nil, **link_options)`
+  accepts a peer. Everything it asks acts as `principal`; frames cannot claim
+  another. A `:host` peer needs its `name`, must announce it, and is reachable
+  at it. `restamp` gives a new principal on `invalidate_principal` (or `nil` to
+  close the link). `max_calls` answers calls beyond it with
+  `unavailable/too_many_calls`.
+- `connect(link, principal:, **link_options)` sets (or replaces, after a
+  reconnect) the link to the parent; remote references re-hold over it and keep
+  their last values meanwhile. The parent's own requests act as `principal`.
+- `route(prefix, Route.new(authorize:, resolve:, principal:))` relays holds for
+  hosts named `prefix…`: `authorize` runs before and after `resolve` (which
+  returns a `Link`, spawning the host if needed); `principal` is what the
+  routed host acts as when it calls back.
+- `LinkOptions`: `ping_interval` (15 s), `ping_timeout` (45 s), `window`
+  (256 KiB of unacknowledged frames; `nil` never holds state back),
+  `pending_cap` (4 windows of waiting ops), `on_protocol_mismatch`
+  (`Proc(Int32, Int32?, Nil)`: local and peer version).
+- Transports: `C.memory_link_pair` (`MemoryLink#sever` simulates a dead
+  network); `C.ipc_link(IpcChannel.new(io))` or `IpcChannel.from_env` (Node's
+  IPC format: one JSON message per line, frames wrapped as `{"chord2": frame}`);
+  `WebSocketLink.connect(url)` or `C.web_socket_link(socket)`.
+  `C.accept_web_sockets(host, **link_options) { |context| principal_or_nil }`
+  returns an `HTTP::WebSocketHandler` that accepts every socket as a client
+  stamped with the authenticator's principal.
+- Frames are `Frame` objects (`t`, `[]`, `payload`, `packed`); `Wire` builds,
+  validates and encodes them, and `Wire.inflate_message` turns a binary
+  WebSocket message back into text. Payloads above `PACK_THRESHOLD` (64 KiB of
+  JSON) travel deflated; relays forward them unread.
+- A hold implies the state of its variant: the provider sends a unit (the shape,
+  then a snapshot of each member the consumer lacks), then delta-encoded ops.
+  When the peer's acknowledgements lag a window behind, state waits in one slot
+  per stream (ops coalesced, or replaced by a reset beyond `pending_cap`), while
+  results and first units go out at once.
+- Remote references to one object share one hold per host, principal key and
+  contract fingerprint. `Ref#ready` resolves once the binding has its shape and
+  every state member's value.
+
+## Child host processes
+
+```crystal
+manager = C.create_host_manager(C.fork_driver("./worker", init: {greeting: "hi"}, lock: "session-S1"))
+instance = manager.start                       # spawned, linked, and reported ready
+server.accept(instance.link, principal: {worker: "w1"}, kind: :host, name: "w1")
+manager.stop                                   # shutdown, then SIGKILL to the group after the grace period
+```
+
+In the child:
+
+```crystal
+control = C.child_control                      # the IPC channel from NODE_CHANNEL_FD
+control.lock                                   # the manager's lock, before opening storage
+host = C.create_host(self: {kind: "host"}, name: "w1",
+  upstream: C.upstream(control.link, principal: {kind: "server"}))
+greeting = control.init.wait
+control.on_shutdown { host.close; exit 0 }
+control.ready
+```
+
+- `C.fork_driver(entry, args:, env:, init:, lock:, on_output:, on_message:)`
+  spawns `entry` with `posix_spawn` as the leader of its own process group, with
+  stdin on `/dev/null` and an IPC socket on fd 3 (`NODE_CHANNEL_FD=3`,
+  `NODE_CHANNEL_SERIALIZATION_MODE=json`), so the child may be a Crystal host or
+  a Node process. When the leader exits, the whole group is killed. A lock the
+  parent inherited is not passed on.
+- `HostManager` (`status`, `instance`, `liveness`, `start`, `stop`, `replace`)
+  serializes its operations, waits `ready_timeout` (30 s) for `ready`, and
+  stops the child when `keep_alive.call(liveness)` returns false (checked every
+  `check_interval`). `Liveness` has `booting`, `active_calls`, `viewers`,
+  `durable_tasks` and `idle_for` (since the busy → idle transition).
+- `ChildControl` has `init` (a `Future(JSON::Any?)`), `lock`, `ready`,
+  `fatal(error)`, `report(active_calls:, viewers:, durable_tasks:)`,
+  `on_shutdown`, `channel` and `link`.
+- `C.process_lock(name)` holds a kernel lock for the process's lifetime: a
+  Linux abstract socket named like chord's (`\0chord2-` + 32 hex digits of
+  SHA-256), so Crystal and Node processes exclude each other; a socket file in
+  the temporary directory elsewhere. It returns the release proc and raises
+  `unavailable/locked` when another process holds it.
 
 ## Replicated state
 
@@ -624,6 +734,18 @@ and reports to `on_error` (an `AggregateError` when disposal also fails).
 - `Readable` (`#value`, `#subscribe`, `#events`), `Cell` (`#change`, `#update`, `#replace`,
   `#schema`), `Derived`, `StateEvent`
 - `Future(T)`, `LLM::Chord.race`, `.await_all`, `.not_ready`
+- `Host#accept`, `#connect`, `#route`, `#connections`, `#upstream`, `#kind`; `Route`, `Upstream`,
+  `LLM::Chord.upstream`, `LinkOptions`, `PeerKind`, `Role`, `Peer`, `Connection` (`#waiting`,
+  `#served`, `#relayed_refs`, `#relayed_calls`), `ServedLocal`, `ServedRelay`
+- `Link`, `BaseLink`, `MemoryLink`, `LLM::Chord.memory_link_pair`, `IpcChannel`, `IpcLink`,
+  `LLM::Chord.ipc_link`, `WebSocketLink`, `LLM::Chord.web_socket_link`, `.accept_web_sockets`
+- `Frame`, `Packed`, `Wire` (`.frame?`, `.to_error`, `.from_error`, `.encode_object`, `.decode_object`,
+  `.parse`, `.encode_message`, `.decode_message`, `.inflate_message`, `FRAME_SCHEMA`),
+  `PROTOCOL_VERSION`, `PACK_THRESHOLD`
+- `LocalRef`, `RemoteRef`, `RemoteBinding`, `ViewReadable`, `MemberReadable`, `Ref#ended?`
+- `LLM::Chord.create_host_manager`, `HostManager`, `Liveness`, `Exit`, `Driver`, `ForkDriver`,
+  `LLM::Chord.fork_driver`, `Instance`, `ForkInstance`, `ControlMessage`, `ChildControl`,
+  `LLM::Chord.child_control`, `.process_lock`, `LOCK_ENV`
 - `Facet`, `LLM::Chord.define_facet`, `FacetApi`, `Registry(V)`, `RegistryConflict`,
   `RegistryView(V)`, `LLM::Chord.define_registry`
 
@@ -662,10 +784,18 @@ and reports to `on_error` (an `AggregateError` when disposal also fails).
 - `linger` and `ready_timeout` are `Time::Span`s.
 - Facets are values: Crystal cannot load code at runtime, so module paths and
   loaders do not apply (see the roadmap's reload decision).
-- Until links are ported, a remote type placed on another host raises
-  `unavailable` ("no route to …") at `get`/`hold`, `GetOptions.state` is not
-  offered, and `invalidate_principal` disposes local objects only. State
-  versions, `migrate`, and `reload` come with reload.
+- State versions, `migrate`, and `reload` come with reload. Until then a host
+  answers a parent's `prepare` with a failed vote (`unavailable/reload_unsupported`),
+  and closes the link to a child host that runs an older code version instead
+  of reconciling it.
+- `Link` is also the name of Crystal's top-level `@[Link]` annotation: code that
+  includes `LLM::Chord` writes `LLM::Chord::Link`.
+- A remote state member whose value is `undefined` reads as JSON `null`.
+- Flow control counts frame sizes in UTF-8 bytes, where chord counts UTF-16
+  code units; the window and caps are local accounting and never cross the wire.
+- The fork driver spawns an executable with arguments (`entry`, `args`) rather
+  than a Node module with `execArgv`; to run a Node child, pass `node` and the
+  script.
 
 ## Development
 
@@ -674,6 +804,11 @@ shards install
 crystal spec
 ameba
 ```
+
+`conformance/run.sh` links Crystal and Node hosts to each other (a Node
+server with a Crystal child over IPC, a Node browser on a Crystal server over a
+WebSocket). It needs upstream chord's sources (`CHORD_SRC`) and Node 22 with
+`typebox` 1.3.27.
 
 Benchmarks live in `bench/` (see `bench/README.md`):
 

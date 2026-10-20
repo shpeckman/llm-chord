@@ -13,7 +13,7 @@ module LLM::Chord
       declare_cell(name, schema, nil, ObjectScope.init_fn(init))
     end
 
-    def get(type : Contract, input = nil, principal = nil) : Ref
+    def get(type : Contract, input = nil, principal = nil, state : Bool = true) : Ref
       host = @object.host
       chosen = principal.nil? ? host.principal : Chord.json_value(principal)
       address = host.address_of(type, input, chosen)
@@ -23,7 +23,7 @@ module LLM::Chord
         end
         return declared
       end
-      ref = host.acquire(type, input, chosen, RefOwner::Object, @object)
+      ref = host.acquire(type, input, chosen, RefOwner::Object, @object, state)
       @run.decls.refs[address] = ref
       @run.created_refs << ref
       ref

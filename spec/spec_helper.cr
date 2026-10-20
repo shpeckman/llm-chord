@@ -83,6 +83,75 @@ def quiet_host(errors : Array(Exception) = [] of Exception) : Host
   LLM::Chord.create_host(self: {kind: "host"}, on_error: ->(error : Exception) { errors << error })
 end
 
+def wire(t : String, **fields) : Frame
+  Frame.build(t, **fields)
+end
+
+def state_frames(frames : Array(Frame)) : Array(Frame)
+  frames.select { |frame| frame.t == "state" }
+end
+
+def quiet_on_error : Proc(Exception, Nil)
+  ->(_error : Exception) { }
+end
+
+class CountingLink < LLM::Chord::Link
+  getter inner : LLM::Chord::Link
+  getter sent = [] of Frame
+  getter received = [] of Frame
+  property? paused = false
+  @held : Frame? = nil
+
+  def initialize(@inner : LLM::Chord::Link); end
+
+  def closed? : Bool
+    @inner.closed?
+  end
+
+  def send(frame : Frame) : Int32?
+    if frame.t == "ack" && @paused
+      @held = frame
+      return 0
+    end
+    @sent << frame
+    @inner.send(frame)
+  end
+
+  def release : Nil
+    @paused = false
+    held = @held
+    @held = nil
+    @inner.send(held) if held
+  end
+
+  def receive(&handler : Frame -> Nil) : Nil
+    hook(handler)
+  end
+
+  def on_close(&handler : String -> Nil) : Nil
+    @inner.on_close(&handler)
+  end
+
+  def close(reason : String = "closed") : Nil
+    @inner.close(reason)
+  end
+
+  def count(direction : Symbol, t : String) : Int32
+    (direction == :sent ? @sent : @received).count { |frame| frame.t == t }
+  end
+
+  def traffic(direction : Symbol) : Array(Frame)
+    (direction == :sent ? @sent : @received).reject { |frame| {"ping", "pong", "ack"}.includes?(frame.t) }
+  end
+
+  private def hook(handler : Proc(Frame, Nil)) : Nil
+    @inner.receive do |frame|
+      @received << frame
+      handler.call(frame)
+    end
+  end
+end
+
 class Emitter
   include Subscribable
 

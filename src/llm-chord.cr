@@ -26,10 +26,16 @@ require "./llm/chord/resource"
 require "./llm/chord/implementation"
 require "./llm/chord/ctx"
 require "./llm/chord/ref"
+require "./llm/chord/remote"
 require "./llm/chord/object"
 require "./llm/chord/scope"
 require "./llm/chord/facet"
+require "./llm/chord/wire"
+require "./llm/chord/link"
+require "./llm/chord/connection"
 require "./llm/chord/host"
+require "./llm/chord/websocket"
+require "./llm/chord/manager"
 
 module LLM::Chord
 end

@@ -91,7 +91,7 @@ module LLM::Chord
     getter implementations = {} of Int32 => Installed
     @service : Service? = nil
     @pending = ::Set(Decls).new
-    @refs = ::Set(Ref).new
+    @refs = ::Set(LocalRef).new
     @open_order = [] of AnyResource
     @activation_abort = AbortController.new
     @subscriptions = {} of String => Proc(Nil)
@@ -126,7 +126,7 @@ module LLM::Chord
       @implementations[@host.code_version]? || @implementations.values.last?
     end
 
-    protected def call(ref : Ref, name : String, args : JSON::Any?, ctx : Ctx) : JSON::Any?
+    protected def call(ref : LocalRef, name : String, args : JSON::Any?, ctx : Ctx) : JSON::Any?
       ctx.check(@host)
       raise ref.terminal_error if ref.status.released? || ref.status.gone?
       Chord.race(ref.ready, ctx.signal) if ref.status.loading?
@@ -164,13 +164,13 @@ module LLM::Chord
       result
     end
 
-    protected def add_ref(ref : Ref) : Nil
+    protected def add_ref(ref : LocalRef) : Nil
       @refs << ref
       @linger_token += 1
       @lingering = false
     end
 
-    protected def release(ref : Ref) : Nil
+    protected def release(ref : LocalRef) : Nil
       maybe_idle if @refs.delete(ref)
     end
 

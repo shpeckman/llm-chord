@@ -19,9 +19,10 @@ module LLM::Chord
       @release = linked[1]
     end
 
-    def get(type : Contract, input = nil, principal = nil) : Ref
+    def get(type : Contract, input = nil, principal = nil, state : Bool = true) : Ref
       check(@host)
-      ref = @host.acquire(type, input, principal.nil? ? @principal : Chord.json_value(principal), RefOwner::Call)
+      ref = @host.acquire(type, input, principal.nil? ? @principal : Chord.json_value(principal), RefOwner::Call,
+        state: state)
       @refs << ref
       Chord.await_ready(ref, [@signal, @closing.signal], @host.ready_timeout)
       ref

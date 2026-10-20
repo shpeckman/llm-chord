@@ -1,5 +1,35 @@
 # src/llm/chord/host.cr
 module LLM::Chord
+  class Route
+    getter authorize : Proc(JSON::Any, String, Bool)
+    getter resolve : Proc(String, Link)
+    getter principal : Proc(String, JSON::Any)
+
+    def initialize(*, authorize : Proc(JSON::Any, String, A), resolve : Proc(String, L), principal : Proc(String, P)) forall A, L, P
+      @authorize = Route.authorizer(authorize)
+      @resolve = Route.resolver(resolve)
+      @principal = Route.stamper(principal)
+    end
+
+    protected def self.authorizer(authorize : Proc(JSON::Any, String, A)) : Proc(JSON::Any, String, Bool) forall A
+      ->(principal : JSON::Any, host : String) { authorize.call(principal, host) == true }
+    end
+
+    protected def self.resolver(resolve : Proc(String, L)) : Proc(String, Link) forall L
+      ->(host : String) { resolve.call(host).as(Link) }
+    end
+
+    protected def self.stamper(principal : Proc(String, P)) : Proc(String, JSON::Any) forall P
+      ->(host : String) { Chord.json_value(principal.call(host)) }
+    end
+  end
+
+  record Upstream, link : Link, principal : JSON::Any, options : LinkOptions
+
+  def self.upstream(link : Link, *, principal, **options) : Upstream
+    Upstream.new(link, json_value(principal), LinkOptions.new(**options))
+  end
+
   class Host
     EMPTY_TABLE = RegistryTable.new
 
@@ -7,7 +37,10 @@ module LLM::Chord
     getter? dev : Bool
     getter principal : JSON::Any
     getter ready_timeout : Time::Span?
+    getter kind : PeerKind
     getter code_version = 1
+    getter connections = ::Set(Connection).new
+    getter upstream : Connection? = nil
     protected property in_factory = 0
     protected getter source_options : SourceOptions { SourceOptions.new(@dev, ->(error : Exception) { report(error) }) }
     @objects = {} of String => ObjectImpl
@@ -19,18 +52,34 @@ module LLM::Chord
     @tables = {} of String => RegistryTable
     @order = {} of String => Hash(String, Int32)
     @subscribers = {} of String => Listeners(TableListener)
+    @bindings = {} of String => RemoteBinding
+    @lingering = {} of String => RemoteBinding
+    @routes = {} of String => Route
+    @roots = {} of String => Int32
+    @local = ::Set(String).new
+    @foreign = {} of String => ::Set(Connection)
+    @root_links = {} of String => ::Set(Connection)
+    @retire_allowed = 0
+    @origin_seq = 0
     @root_seq = 0_i64
     @incarnation : String = Random.new.hex(3)
     @principal_key : Proc(JSON::Any, String)
     @self_key : String
     @on_error : Reporter
+    @linger_types : Hash(String, Time::Span)
+    @linger_cap : Int32
 
     def initialize(*, self principal, @name : String = "host", principal_key : Proc(JSON::Any, String)? = nil,
-                   @dev : Bool = false, on_error = nil, @ready_timeout : Time::Span? = 60.seconds)
+                   @dev : Bool = false, on_error = nil, @ready_timeout : Time::Span? = 60.seconds,
+                   @kind : PeerKind = PeerKind::Host, upstream : Upstream? = nil,
+                   linger : Hash(String, Time::Span)? = nil, linger_cap : Int32 = 4)
       @principal = Chord.json_value(principal)
       @principal_key = principal_key || Host.canonical_key
       @self_key = @principal_key.call(@principal)
       @on_error = Host.reporter(on_error)
+      @linger_types = linger || {} of String => Time::Span
+      @linger_cap = linger_cap
+      upstream.try { |link| connect(link.link, principal: link.principal, options: link.options) }
     end
 
     def previous_code_version : Int32?
@@ -59,24 +108,22 @@ module LLM::Chord
       Host.wait_ready(@host_objects.values)
     end
 
-    def get(type : Contract, input = nil, principal = nil, signal : AbortSignal? = nil) : Ref
-      ref = acquire(type, input, principal.nil? ? nil : Chord.json_value(principal), RefOwner::External)
+    def get(type : Contract, input = nil, principal = nil, signal : AbortSignal? = nil, state : Bool = true) : Ref
+      ref = acquire(type, input, principal.nil? ? nil : Chord.json_value(principal), RefOwner::External, state: state)
       Chord.await_ready(ref, signal ? [signal] : [] of AbortSignal, @ready_timeout)
       ref
     end
 
-    def hold(type : Contract, input = nil, principal = nil) : Ref
-      acquire(type, input, principal.nil? ? nil : Chord.json_value(principal), RefOwner::External)
+    def hold(type : Contract, input = nil, principal = nil, state : Bool = true) : Ref
+      acquire(type, input, principal.nil? ? nil : Chord.json_value(principal), RefOwner::External, state: state)
     end
 
-    def root(principal = nil, signal : AbortSignal? = nil, &)
+    def root(principal = nil, signal : AbortSignal? = nil, code_version : Int32? = nil, &)
       @root_seq += 1
-      ctx = Ctx.new(self, signal ? [signal] : [] of AbortSignal, "#{@name}##{@incarnation}:#{@root_seq}", @code_version,
-        principal.nil? ? @principal : Chord.json_value(principal))
-      begin
+      root_id = "#{@name}##{@incarnation}:#{@root_seq}"
+      @local << root_id
+      join_root(root_id, code_version || @code_version, principal.nil? ? nil : Chord.json_value(principal), signal) do |ctx|
         yield ctx
-      ensure
-        ctx.close
       end
     end
 
@@ -85,19 +132,47 @@ module LLM::Chord
     end
 
     def invalidate_principal(&match : JSON::Any -> Bool) : Nil
-      invalidate(match)
+      invalidate(match, nil)
     end
 
     def invalidate_principal(pattern) : Nil
       fields = Chord.json_value(pattern)
-      invalidate(Host.pattern_matcher(fields))
+      invalidate(Host.pattern_matcher(fields), fields)
+    end
+
+    def accept(link : Link, *, principal, kind : PeerKind = PeerKind::Client, name : String? = nil, restamp = nil,
+               max_calls : Int32? = nil, options : LinkOptions? = nil, **link_options) : Nil
+      raise ArgumentError.new("accepting a host link needs its name") if kind.host? && name.nil?
+      origin = kind.client? ? "#{@incarnation}:#{@origin_seq += 1}" : nil
+      add_connection(Connection.new(self, link, Role::Downstream, Chord.json_value(principal),
+        Peer.new(kind, kind.host? ? name : nil), options || LinkOptions.new(**link_options), origin,
+        Host.restamper(restamp), max_calls))
+    end
+
+    def connect(link : Link, *, principal, options : LinkOptions? = nil, **link_options) : Nil
+      @upstream.try { |previous| previous.link.close("replaced") if previous.open? }
+      connection = add_connection(Connection.new(self, link, Role::Upstream, Chord.json_value(principal),
+        Peer.new(PeerKind::Host, nil), options || LinkOptions.new(**link_options)))
+      @upstream = connection
+      @bindings.values.each do |binding|
+        connection.hold(binding, binding.applied?) if binding.hold.nil? && !binding.ended?
+      end
+    end
+
+    def route(prefix : String, route : Route) : Nil
+      @routes[prefix] = route
     end
 
     def close : Nil
+      @lingering.values.each(&.close)
       @host_objects.clear
       @facet_runs.keys.each { |name| facet_run_changed(name, nil) }
-      Host.dispose_holders_first(@objects.values, ChordError.new(ErrorCode::Gone, "host #{@name} closed"),
-        "host close: disposal failed")
+      begin
+        Host.dispose_holders_first(@objects.values, ChordError.new(ErrorCode::Gone, "host #{@name} closed"),
+          "host close: disposal failed")
+      ensure
+        @connections.to_a.each(&.link.close("host closed"))
+      end
     end
 
     def report(error : Exception) : Nil
@@ -122,9 +197,51 @@ module LLM::Chord
       @services[contract.name] = service
     end
 
-    protected def acquire(type : Contract, input, principal : JSON::Any?, owner : RefOwner, from : ObjectImpl? = nil) : Ref
+    protected def join_root(root_id : String, code_version : Int32, principal : JSON::Any? = nil,
+                            signal : AbortSignal? = nil, from : Connection? = nil, &)
+      unless code_version?(code_version)
+        @local.delete(root_id)
+        raise ChordError.new(ErrorCode::Superseded, "code version #{code_version} is not retained by #{@name}")
+      end
+      if from && !@local.includes?(root_id)
+        (@foreign[root_id] ||= ::Set(Connection).new) << from
+      end
+      @roots[root_id] = (@roots[root_id]? || 0) + 1
+      ctx = Ctx.new(self, signal ? [signal] : [] of AbortSignal, root_id, code_version, principal || @principal)
+      begin
+        yield ctx
+      ensure
+        ctx.close
+        count = (@roots[root_id]? || 1) - 1
+        if count > 0
+          @roots[root_id] = count
+        else
+          @roots.delete(root_id)
+          end_root(root_id) unless @foreign.has_key?(root_id)
+        end
+      end
+    end
+
+    protected def root_sent(root_id : String, connection : Connection) : Nil
+      (@root_links[root_id] ||= ::Set(Connection).new) << connection
+    end
+
+    protected def foreign_root_ended(root_id : String, from : Connection) : Nil
+      links = @foreign[root_id]?
+      return unless links && links.delete(from) && links.empty?
+      if @roots.has_key?(root_id)
+        @foreign.delete(root_id)
+      else
+        end_root(root_id)
+      end
+    end
+
+    protected def acquire(type : Contract, input, principal : JSON::Any?, owner : RefOwner, from : ObjectImpl? = nil,
+                          state : Bool = true) : Ref
       raw = Chord.json_input(input)
-      check_here(type, raw)
+      if elsewhere = elsewhere(type, raw)
+        return acquire_remote(type, elsewhere[0], elsewhere[1], principal, owner, state)
+      end
       service = @services[type.name]? || raise unknown_type(type.name)
       Chord.bind(service.contract, service.accepts, type)
       address, normalized, chosen = locate(service, raw, principal || @principal)
@@ -137,14 +254,16 @@ module LLM::Chord
         raise Chord.invalid("cycle", "#{from.address} -> #{address} would create a ref cycle")
       end
       object ||= create_object(service, type, address, normalized, chosen)
-      ref = Ref.new(object, type, owner)
+      ref = LocalRef.new(object, type, owner)
       object.add_ref(ref)
       ref
     end
 
     protected def address_of(type : Contract, input, principal : JSON::Any) : String
       raw = Chord.json_input(input)
-      check_here(type, raw)
+      if elsewhere = elsewhere(type, raw)
+        return remote_key(type, elsewhere[1], principal)
+      end
       service = @services[type.name]? || raise unknown_type(type.name)
       locate(service, raw, principal)[0]
     end
@@ -183,6 +302,86 @@ module LLM::Chord
       entries = live_decls.reject { |(object, _)| object.same?(including) }
       entries << {including, including.decls} if including
       install_tables(build_tables(entries))
+    end
+
+    protected def peer_hello(connection : Connection, code_version : Int32) : Nil
+      if code_version > @code_version
+        report(ChordError.new(ErrorCode::Invalid, "#{connection.name} runs code version #{code_version}, ahead of #{@code_version}"))
+        connection.link.close("code version ahead of parent")
+        return
+      end
+      if code_version == @code_version
+        connection.mark_synced(code_version)
+        return
+      end
+      report(ChordError.new(ErrorCode::Unavailable,
+        "#{connection.name} runs code version #{code_version}, behind #{@code_version}; reconciling it needs reload"))
+      connection.link.close("code version behind parent")
+    end
+
+    protected def allow_retire(code_version : Int32) : Nil
+      @retire_allowed = Math.max(@retire_allowed, code_version)
+    end
+
+    protected def on_reload_frame(connection : Connection, frame : Frame) : Nil
+      return unless frame.t == "prepare"
+      error = ChordError.new(ErrorCode::Unavailable, "#{@name} cannot reload", reason: "reload_unsupported")
+      connection.send(Frame.build("vote", reload: frame.int("reload"), error: Wire.to_error(error)))
+    end
+
+    protected def connection_closed(connection : Connection) : Nil
+      @connections.delete(connection)
+      @foreign.to_a.each { |(root_id, links)| foreign_root_ended(root_id, connection) if links.includes?(connection) }
+      @root_links.each_value(&.delete(connection))
+      @upstream = nil if @upstream.same?(connection)
+    end
+
+    protected def binding_idle(binding : RemoteBinding) : Nil
+      span = @linger_types[binding.contract.name]?
+      if span.nil? || span <= Time::Span.zero || binding.ended? || !binding.applied? || @linger_cap <= 0
+        binding.close
+        return
+      end
+      token = binding.linger_token += 1
+      spawn { linger_then_close(binding, span, token) }
+      @lingering[binding.key] = binding
+      @lingering.values.each do |oldest|
+        break if @lingering.size <= @linger_cap
+        oldest.close
+      end
+    end
+
+    protected def forget_binding(binding : RemoteBinding) : Nil
+      @bindings.delete(binding.key) if @bindings[binding.key]?.same?(binding)
+      @lingering.delete(binding.key) if @lingering[binding.key]?.same?(binding)
+    end
+
+    protected def relay(relay : RelayRef) : Nil
+      frame = relay.frame
+      at = frame.string("at")
+      token = Chord.contract_from_description(frame["token"])
+      placement = token.description.host
+      unless placement && placement.resolve(token.name, frame["input"]) == at
+        raise Chord.invalid("placement", "#{token.name} with this input does not live on #{at}")
+      end
+      route = route_for(at)
+      unless route
+        raise child_named(at) ? ChordError.new(ErrorCode::Forbidden, "no route authorizes #{at}") : ChordError.new(ErrorCode::Unavailable, "no route to #{at}")
+      end
+      down = resolve_route(route, at, relay.principal, relay)
+      return unless relay.current?
+      relay.open(down)
+    end
+
+    private def end_root(root_id : String) : Nil
+      @local.delete(root_id)
+      @foreign.delete(root_id)
+      @root_links.delete(root_id).try &.each(&.send(Frame.build("root_end", rootId: root_id)))
+    end
+
+    private def add_connection(connection : Connection) : Connection
+      @connections << connection if connection.open?
+      connection
     end
 
     private def install_facet(facet : Facet) : Array(Ref)
@@ -224,12 +423,77 @@ module LLM::Chord
       object
     end
 
-    private def check_here(type : Contract, input : JSON::Any?) : Nil
+    private def elsewhere(type : Contract, input : JSON::Any?) : Tuple(String, JSON::Any)?
       placement = type.description.host
       return unless type.remote? && placement
-      normalized = Schema.normalize(type.input, input, "#{type.name} input")
+      normalized = Schema.normalize(type.input, input, "#{type.name} input").not_nil!
       at = placement.resolve(type.name, normalized)
-      raise ChordError.new(ErrorCode::Unavailable, "no route to #{at}") unless at == @name
+      at == @name ? nil : {at, normalized}
+    end
+
+    private def acquire_remote(type : Contract, at : String, input : JSON::Any, principal : JSON::Any?, owner : RefOwner,
+                               state : Bool) : Ref
+      forwarded = principal.nil? || own_principal?(principal) ? nil : principal
+      key = remote_key(type, input, forwarded || @principal)
+      binding = @bindings[key]?
+      fresh = binding.nil? || binding.ended?
+      if binding.nil? || binding.ended?
+        binding = RemoteBinding.new(self, key, type, at, input, forwarded)
+        @bindings[key] = binding
+      end
+      ref = RemoteRef.new(binding, owner, state)
+      @lingering.delete(key)
+      binding.add_view(ref)
+      hold(binding) if fresh
+      ref
+    end
+
+    private def hold(binding : RemoteBinding) : Nil
+      if upstream = @upstream
+        upstream.hold(binding, false)
+      elsif direct = child_named(binding.at)
+        spawn { hold_when_synced(binding) { direct.when_synced; direct } }
+      elsif route = route_for(binding.at)
+        spawn { hold_when_synced(binding) { resolve_route(route, binding.at, binding.principal || @principal, nil) } }
+      else
+        binding.gone(ChordError.new(ErrorCode::Unavailable, "no route to #{binding.at}"))
+      end
+    end
+
+    private def hold_when_synced(binding : RemoteBinding, & : -> Connection) : Nil
+      target = yield
+      target.hold(binding, false) if !binding.ended? && binding.hold.nil?
+    rescue error
+      binding.gone(error)
+    end
+
+    private def route_for(host_name : String) : Route?
+      best = nil.as(Tuple(String, Route)?)
+      @routes.each do |prefix, route|
+        best = {prefix, route} if host_name.starts_with?(prefix) && (best.nil? || prefix.size > best[0].size)
+      end
+      best.try(&.[1])
+    end
+
+    private def child_named(name : String) : Connection?
+      @connections.find { |connection| connection.open? && connection.role.downstream? && connection.peer.kind.host? && connection.peer.name == name }
+    end
+
+    private def resolve_route(route : Route, host_name : String, principal : JSON::Any, relay : RelayRef?) : Connection
+      refuse = ChordError.new(ErrorCode::Forbidden, "#{host_name} refused for this principal")
+      revoked = ChordError.new(ErrorCode::Gone, "principal invalidated while resolving")
+      raise refuse unless route.authorize.call(principal, host_name)
+      raise revoked if relay && !relay.current?
+      link = route.resolve.call(host_name)
+      raise revoked if relay && !relay.current?
+      raise refuse unless route.authorize.call(principal, host_name)
+      raise revoked if relay && !relay.current?
+      connection = @connections.find(&.link.same?(link)) ||
+                   add_connection(Connection.new(self, link, Role::Downstream, route.principal.call(host_name),
+                     Peer.new(PeerKind::Host, host_name), LinkOptions.new))
+      connection.when_synced
+      raise revoked if relay && !relay.current?
+      connection
     end
 
     private def locate(service : Service, input : JSON::Any?, principal : JSON::Any) : Tuple(String, JSON::Any, JSON::Any)
@@ -244,6 +508,11 @@ module LLM::Chord
         principal = @principal
       end
       {"#{contract.name}\u0000#{identity}\u0000#{principal_part(principal)}", normalized, principal}
+    end
+
+    private def remote_key(type : Contract, normalized : JSON::Any, principal : JSON::Any) : String
+      identity = Schema.canonical_identity(type.input, normalized)
+      "@#{type.name}\u0000#{identity}\u0000#{principal_part(principal)}\u0000#{type.fingerprint}"
     end
 
     private def own_principal?(principal : JSON::Any) : Bool
@@ -308,10 +577,25 @@ module LLM::Chord
       end
     end
 
-    private def invalidate(matches : Proc(JSON::Any, Bool)) : Nil
+    private def invalidate(matches : Proc(JSON::Any, Bool), pattern : JSON::Any?) : Nil
+      @connections.to_a.each do |connection|
+        next unless connection.role.downstream? && matches.call(connection.principal)
+        connection.revoke(connection.restamp.try &.call(connection.principal))
+      end
+      if pattern
+        @connections.each do |connection|
+          next unless connection.role.downstream? && connection.peer.kind.host?
+          connection.send(Frame.build("invalidate", pattern: pattern))
+        end
+      end
       reason = ChordError.new(ErrorCode::Gone, "principal invalidated")
       matching = @objects.values.select { |object| !own_principal?(object.principal) && matches.call(object.principal) }
       Host.dispose_holders_first(matching, reason, "invalidatePrincipal: disposal failed")
+    end
+
+    private def linger_then_close(binding : RemoteBinding, span : Time::Span, token : Int32) : Nil
+      sleep span
+      binding.close if binding.linger_token == token && binding.views.empty? && !binding.ended?
     end
 
     protected def self.wait_ready(refs : Enumerable(Ref)) : Nil
@@ -328,6 +612,22 @@ module LLM::Chord
 
     protected def self.reporter(on_error : Proc(Exception, U)) : Reporter forall U
       ->(error : Exception) { on_error.call(error); nil }
+    end
+
+    protected def self.restamper(_restamp : Nil) : Proc(JSON::Any, JSON::Any?)?
+      nil
+    end
+
+    protected def self.restamper(restamp : Proc(JSON::Any, U)) : Proc(JSON::Any, JSON::Any?)? forall U
+      ->(principal : JSON::Any) : JSON::Any? { Host.optional_json(restamp.call(principal)) }
+    end
+
+    protected def self.optional_json(_value : Nil) : JSON::Any?
+      nil
+    end
+
+    protected def self.optional_json(value) : JSON::Any?
+      Chord.json_value(value)
     end
 
     protected def self.pattern_matcher(pattern : JSON::Any) : Proc(JSON::Any, Bool)
@@ -352,7 +652,7 @@ module LLM::Chord
         return true if object.same?(to)
         next if seen.includes?(object)
         seen << object
-        object.all_decls.each { |decls| decls.refs.each_value { |ref| stack << ref.object } }
+        object.all_decls.each { |decls| decls.refs.each_value { |ref| ref.object.try { |held| stack << held } } }
       end
       false
     end
@@ -377,12 +677,12 @@ module LLM::Chord
 
     private def self.held_by(object : ObjectImpl) : ::Set(ObjectImpl)
       result = ::Set(ObjectImpl).new
-      object.all_decls.each { |decls| decls.refs.each_value { |ref| result << ref.object } }
+      object.all_decls.each { |decls| decls.refs.each_value { |ref| ref.object.try { |held| result << held } } }
       result
     end
   end
 
-  def self.create_host(**options) : Host
-    Host.new(**options)
+  macro create_host(**options)
+    ::LLM::Chord::Host.new({{options.double_splat}})
   end
 end

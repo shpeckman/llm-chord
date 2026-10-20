@@ -5,11 +5,108 @@ module LLM::Chord
     Call
     Host
     External
+    Connection
+    Client
   end
 
   alias StatusListener = Proc(RefStatus, Exception?, Nil)
 
-  class Ref
+  abstract class Ref
+    @shape_listeners = Listeners(Proc(Shape, Nil)).new
+    @status_listeners = Listeners(StatusListener).new
+
+    abstract def contract : Contract
+    abstract def address : String
+    abstract def ready : Future(Nil)
+    abstract def status : RefStatus
+    abstract def error : Exception?
+    abstract def variant : String?
+    abstract def shape : Shape?
+    abstract def state(name : String) : Readable
+    abstract def release : Nil
+
+    protected abstract def object : ObjectImpl?
+    protected abstract def owner_host : Host
+    protected abstract def dispatch(name : String, input : JSON::Any?, ctx : Ctx) : JSON::Any?
+
+    def call(name : String, ctx : Ctx) : JSON::Any?
+      call(name, nil, ctx)
+    end
+
+    def call(name : String, args = nil, ctx : Ctx? = nil) : JSON::Any?
+      input = Chord.takes_no_args?(contract, name) ? nil : Chord.json_input(args)
+      host = owner_host
+      raise ChordError.new(ErrorCode::NotReady, "#{address}.#{name} called inside a factory") if host.in_factory > 0
+      ctx.try &.check(host)
+      if ctx && !ctx.holder?
+        dispatch(name, input, ctx)
+      else
+        host.root(signal: ctx.try(&.signal)) { |root| dispatch(name, input, root) }
+      end
+    end
+
+    def opaque(name : String, _type : T.class) : T? forall T
+      case member = opaque_member(name)
+      when Exposed     then member.resource.as(Resource(T)).open_value
+      when OpaqueValue then member.as(OpaqueBox(T)).value
+      end
+    end
+
+    def on_shape(&listener : Shape -> Nil) : Proc(Nil)
+      @shape_listeners.remover(@shape_listeners.add(listener))
+    end
+
+    def on_status(&listener : RefStatus, Exception? -> Nil) : Proc(Nil)
+      @status_listeners.remover(@status_listeners.add(listener))
+    end
+
+    def ended? : Bool
+      status.released? || status.gone?
+    end
+
+    protected def opaque_member(name : String) : MemberValue?
+      nil
+    end
+
+    protected def report(error : Exception) : Nil
+      owner_host.report(error)
+    end
+
+    protected def status_changed : Nil
+      return if @status_listeners.empty?
+      listeners = @status_listeners.snapshot
+      current = status
+      failure = error
+      Publish.enqueue { notify_status(listeners, current, failure) }
+    end
+
+    protected def notify_shape(current : Shape) : Nil
+      listeners = @shape_listeners.snapshot
+      Publish.enqueue { deliver_shape(listeners, current) }
+    end
+
+    protected def released_error : ChordError
+      ChordError.new(ErrorCode::Released, "reference #{address} released")
+    end
+
+    private def notify_status(listeners, current : RefStatus, failure : Exception?) : Nil
+      listeners.each do |(_, listener)|
+        listener.call(current, failure)
+      rescue thrown
+        report(thrown)
+      end
+    end
+
+    private def deliver_shape(listeners, current : Shape) : Nil
+      listeners.each do |(_, listener)|
+        listener.call(current)
+      rescue thrown
+        report(thrown)
+      end
+    end
+  end
+
+  class LocalRef < Ref
     getter contract : Contract
     getter address : String
     getter ready : Future(Nil)
@@ -18,8 +115,7 @@ module LLM::Chord
     protected getter object : ObjectImpl
     protected getter owner : RefOwner
     @variants : Hash(String, Hash(String, MemberDescription))
-    @shape_listeners = Listeners(Proc(Shape, Nil)).new
-    @status_listeners = Listeners(StatusListener).new
+    @gone_listeners = Listeners(Proc(Exception, Nil)).new
     @readables = {} of String => MemberReadable
     @bindings = {} of Service => Adapter?
     @views = {} of Implementation => Implementation
@@ -32,33 +128,8 @@ module LLM::Chord
       @object.ready.on_settle { settle_ready }
     end
 
-    def call(name : String, ctx : Ctx) : JSON::Any?
-      call(name, nil, ctx)
-    end
-
-    def call(name : String, args = nil, ctx : Ctx? = nil) : JSON::Any?
-      input = Chord.takes_no_args?(@contract, name) ? nil : Chord.json_input(args)
-      host = @object.host
-      raise ChordError.new(ErrorCode::NotReady, "#{@address}.#{name} called inside a factory") if host.in_factory > 0
-      if ctx && !ctx.holder?
-        @object.call(self, name, input, ctx)
-      else
-        ctx.try &.check(host)
-        host.root(signal: ctx.try(&.signal)) { |root| @object.call(self, name, input, root) }
-      end
-    end
-
     def state(name : String) : Readable
       @readables[name] ||= MemberReadable.new(self, name)
-    end
-
-    def opaque(name : String, _type : T.class) : T? forall T
-      view = current_view
-      return if view.nil? || !in_variant?(view, name)
-      case member = view[name]?
-      when Exposed     then member.resource.as(Resource(T)).open_value
-      when OpaqueValue then member.as(OpaqueBox(T)).value
-      end
     end
 
     def variant : String?
@@ -73,20 +144,30 @@ module LLM::Chord
       Shape.new(view.variant, view.keys, installed.service.contract.fingerprint)
     end
 
-    def on_shape(&listener : Shape -> Nil) : Proc(Nil)
-      @shape_listeners.remover(@shape_listeners.add(listener))
-    end
-
-    def on_status(&listener : RefStatus, Exception? -> Nil) : Proc(Nil)
-      @status_listeners.remover(@status_listeners.add(listener))
-    end
-
     def release : Nil
-      return if @status.released? || @status.gone?
+      return if ended?
       @status = RefStatus::Released
       stop_readables
       status_changed
       @object.release(self)
+    end
+
+    protected def owner_host : Host
+      @object.host
+    end
+
+    protected def dispatch(name : String, input : JSON::Any?, ctx : Ctx) : JSON::Any?
+      @object.call(self, name, input, ctx)
+    end
+
+    protected def opaque_member(name : String) : MemberValue?
+      view = current_view
+      return if view.nil? || !in_variant?(view, name)
+      view[name]?
+    end
+
+    protected def on_gone(&listener : Exception -> Nil) : Proc(Nil)
+      @gone_listeners.remover(@gone_listeners.add(listener))
     end
 
     protected def live : Nil
@@ -97,19 +178,18 @@ module LLM::Chord
     end
 
     protected def gone(error : Exception) : Nil
-      return if @status.released? || @status.gone?
+      return if ended?
       @status = RefStatus::Gone
       @error = error
       stop_readables
       status_changed
+      @gone_listeners.snapshot.each { |(_, listener)| listener.call(error) }
     end
 
     protected def shape_changed : Nil
       @readables.each_value(&.bind)
       current = shape
-      return unless current
-      listeners = @shape_listeners.snapshot
-      Publish.enqueue { notify_shape(listeners, current) }
+      notify_shape(current) if current
     end
 
     protected def terminal_error : Exception
@@ -139,22 +219,14 @@ module LLM::Chord
       !@contract.remote? || !describe(view.variant, name).nil?
     end
 
-    protected def report(error : Exception) : Nil
-      @object.host.report(error)
-    end
-
     private def settle_ready : Nil
       if failure = @object.ready.error
         @ready.reject(failure)
-      elsif @status.gone? || @status.released?
+      elsif ended?
         @ready.reject(terminal_error)
       else
         @ready.resolve(nil)
       end
-    end
-
-    private def released_error : ChordError
-      ChordError.new(ErrorCode::Released, "reference #{@address} released")
     end
 
     private def safe_view(installed : Installed) : Implementation?
@@ -162,30 +234,6 @@ module LLM::Chord
     rescue error
       report(error)
       nil
-    end
-
-    private def status_changed : Nil
-      return if @status_listeners.empty?
-      listeners = @status_listeners.snapshot
-      status = @status
-      error = @error
-      Publish.enqueue { notify_status(listeners, status, error) }
-    end
-
-    private def notify_status(listeners, status : RefStatus, error : Exception?) : Nil
-      listeners.each do |(_, listener)|
-        listener.call(status, error)
-      rescue thrown
-        report(thrown)
-      end
-    end
-
-    private def notify_shape(listeners, current : Shape) : Nil
-      listeners.each do |(_, listener)|
-        listener.call(current)
-      rescue thrown
-        report(thrown)
-      end
     end
 
     private def stop_readables : Nil
@@ -201,10 +249,10 @@ module LLM::Chord
     @upstream : Proc(Nil)? = nil
     @seen : Tuple(JSON::Any)? = nil
 
-    def initialize(@ref : Ref, @name : String); end
+    def initialize(@ref : LocalRef, @name : String); end
 
     def value : JSON::Any
-      raise @ref.terminal_error if @ref.status.released? || @ref.status.gone?
+      raise @ref.terminal_error if @ref.ended?
       raise Chord.not_ready("#{@ref.address}.#{@name}") unless @ref.status.live?
       view = @ref.current_view
       raise Chord.not_ready("#{@ref.address}.#{@name}") unless view
@@ -237,15 +285,16 @@ module LLM::Chord
 
     protected def bind : Nil
       source = @values.size + @events.size > 0 ? current : nil
-      return if source.same?(@source) || (source.nil? && @source.nil?)
+      previous = @source
+      return if source.nil? ? previous.nil? : source.same?(previous)
       @upstream.try(&.call)
       @upstream = nil
       @source = source
       return unless source
-      first = [true]
+      first = true
       @upstream = source.events do |event|
-        forward(event, first[0])
-        first[0] = false
+        forward(event, first)
+        first = false
       end
     end
 

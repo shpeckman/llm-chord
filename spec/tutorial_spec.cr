@@ -180,6 +180,30 @@ describe "tutorial" do
     host.try &.close
   end
 
+  it "06: remote methods and live state over a memory link" do
+    server = C.create_host(self: "server", name: "server")
+    serve_store(server)
+    serve_views(server)
+    down, up = C.memory_link_pair
+    server.accept(down, principal: "owner", kind: :client)
+    browser = C.create_host(self: "browser", name: "browser", kind: :client, upstream: C.upstream(up, principal: "server"))
+    todos = browser.get(TODOS, {list: "family"})
+    todos.variant.should eq "editor"
+    todos.state("rows").value.should eq j("[]")
+    updated = Channel(Nil).new(1)
+    stop = todos.state("rows").subscribe { |rows| notify(updated) if rows.as_a?.try(&.size) == 1 }
+    browser.root { |ctx| todos.call("add", {text: "Buy milk"}, ctx) }
+    updated.receive
+    todos.state("rows").value.should eq j(%([{"text":"Buy milk","done":false}]))
+    chord_error(ErrorCode::Invalid) { todos.call("add", {text: 123}) }
+    stop.call
+    todos.state("rows").value.should eq j(%([{"text":"Buy milk","done":false}]))
+    todos.release
+  ensure
+    browser.try &.close
+    server.try &.close
+  end
+
   it "07: listeners react and tasks start fresh calls" do
     activity_contract = C.local("tutorial.activity", version: 1, input: T.object, members: {seen: T.number})
     host = C.create_host(self: "server")
