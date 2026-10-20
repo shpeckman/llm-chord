@@ -1,5 +1,6 @@
 # .gitignore
 /docs/
+/.dev/
 /lib/
 /bin/
 /.shards/
