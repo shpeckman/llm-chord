@@ -155,4 +155,39 @@ describe LLM::Chord::Delta do
       apply_immutable_batches(base, [b1, b2]).should eq JSON.parse(%({"a":2}))
     end
   end
+
+  describe ".apply_immutable_shared" do
+    it "produces the same value as apply_immutable" do
+      base = JSON.parse(%({"a":{"b":[1,2]},"c":"x"}))
+      ops = [
+        Op::Set.new(path("a", "b", 0), JSON::Any.new(9_i64)),
+        Op::Set.new(path("c"), JSON::Any.new("y")),
+      ]
+      LLM::Chord::Delta.apply_immutable_shared(base, ops).should eq apply_immutable(base, ops)
+    end
+
+    it "shares untouched subtrees with the target" do
+      base = JSON.parse(%({"a":{"x":1},"b":{"y":2}}))
+      result = LLM::Chord::Delta.apply_immutable_shared(base, [Op::Set.new(path("a", "x"), JSON::Any.new(9_i64))])
+      result["a"]["x"].as_i.should eq 9_i64
+      result["b"].raw.object_id.should eq base["b"].raw.object_id
+      base["a"]["x"].as_i.should eq 1_i64
+    end
+
+    it "adopts op payloads" do
+      payload = JSON.parse(%({"n":0}))
+      result = LLM::Chord::Delta.apply_immutable_shared(JSON.parse(%({"a":0})), [Op::Set.new(path("a"), payload)])
+      payload.as_h["n"] = JSON::Any.new(1_i64)
+      result["a"]["n"].as_i.should eq 1_i64
+    end
+  end
+
+  describe ".apply_immutable_batches_shared" do
+    it "matches apply_immutable_batches" do
+      base = JSON.parse(%({"a":0}))
+      b1 = [Op::Set.new(path("a"), JSON::Any.new(1_i64))]
+      b2 = [Op::Set.new(path("a"), JSON::Any.new(2_i64))]
+      LLM::Chord::Delta.apply_immutable_batches_shared(base, [b1, b2]).should eq apply_immutable_batches(base, [b1, b2])
+    end
+  end
 end
