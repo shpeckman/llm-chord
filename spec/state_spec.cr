@@ -199,5 +199,18 @@ describe LLM::Chord do
       attachment.emit(12_i64, JSON.parse(%({"n":1})))
       errors.size.should eq 1
     end
+
+    it "disposes idempotently and ignores frames after dispose" do
+      snapshot = LLM::Chord::Snapshot.new(JSON.parse(%({"n":0})), 10_i64)
+      attachment = FakeAttachment.new(snapshot)
+      state = LLM::Chord.replicated_state(FakeSource.new(attachment))
+      values = [] of JSON::Any
+      state.subscribe { |value, _delivery| values << value }
+      state.dispose
+      state.dispose
+      attachment.disposed.should be_true
+      attachment.emit(11_i64, JSON.parse(%({"n":1})))
+      values.size.should eq 1
+    end
   end
 end
