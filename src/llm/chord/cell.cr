@@ -1,6 +1,5 @@
 # src/llm/chord/cell.cr
-module LLM::Chord
-  class Cell
+  class LLM::Chord::Cell
     @listeners = [] of Proc(JSON::Any, Nil)
 
     def self.from(state : ReplicatedState, &compute : JSON::Any -> JSON::Any) : Cell
@@ -28,4 +27,3 @@ module LLM::Chord
       @listeners.each(&.call(value))
     end
   end
-end

@@ -1,6 +1,5 @@
 # src/llm/chord/context.cr
-module LLM::Chord
-  class Context
+  class LLM::Chord::Context
     def initialize
       @entries = {} of String => JSON::Any
     end
@@ -18,4 +17,3 @@ module LLM::Chord
       @entries[name]?
     end
   end
-end

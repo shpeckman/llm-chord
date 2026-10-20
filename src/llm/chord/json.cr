@@ -1,8 +1,7 @@
 # src/llm/chord/json.cr
 require "json"
 
-module LLM::Chord
-  module Json
+  module LLM::Chord::Json
     def self.deep_copy(value : JSON::Any) : JSON::Any
       case raw = value.raw
       when Hash
@@ -57,4 +56,3 @@ module LLM::Chord
       value
     end
   end
-end
