@@ -271,8 +271,8 @@ module LLM::Chord
       ChordError.new(ErrorCode::Aborted, "#{@address} abandoned")
     end
 
-    private def run_factory(service : Service) : Run
-      scope = ObjectScope.new(self)
+    protected def run(service : Service, previous : Decls?) : Run
+      scope = ObjectScope.new(self, previous)
       run = scope.run
       @pending << run.decls
       @host.in_factory += 1
