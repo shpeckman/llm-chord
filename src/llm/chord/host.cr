@@ -26,6 +26,9 @@ module LLM::Chord
 
   record Upstream, link : Link, principal : JSON::Any, options : LinkOptions
 
+  record CodeVersionState, id : Int32, services : Hash(String, Service), tables : Hash(String, RegistryTable),
+    roots : Hash(String, Int32), abort : AbortController
+
   def self.upstream(link : Link, *, principal, **options) : Upstream
     Upstream.new(link, json_value(principal), LinkOptions.new(**options))
   end
