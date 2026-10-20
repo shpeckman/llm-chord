@@ -134,7 +134,7 @@ describe LLM::Chord do
     it "rejects a reentrant change" do
       state = LLM::Chord.replicated_state(JSON.parse(%({"n":0})))
       expect_raises(Exception) do
-        state.change do |draft|
+        state.change do |_draft|
           state.change { |inner| inner["n"] = 1 }
         end
       end
@@ -143,7 +143,7 @@ describe LLM::Chord do
     it "rejects a reentrant replace" do
       state = LLM::Chord.replicated_state(JSON.parse(%({"n":0})))
       expect_raises(Exception) do
-        state.change do |draft|
+        state.change do |_draft|
           state.replace(JSON.parse(%({"n":1})))
         end
       end
