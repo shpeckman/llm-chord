@@ -31,6 +31,7 @@ module LLM::Chord::Delta
         array = resolve_container(current, op.path)
         raw = array.raw
         raise PathError.new(op.path) unless raw.is_a?(Array) && raw.size == op.permutation.size
+        assert_permutation(op.permutation)
         previous = raw.dup
         op.permutation.each_with_index { |from, index| raw[index] = previous[from] }
       when Op::Set

@@ -111,4 +111,14 @@ module LLM::Chord::Delta
       end
     end
   end
+
+  def self.assert_permutation(permutation : Array(Int32)) : Nil
+    seen = Slice(Bool).new(permutation.size, false)
+    permutation.each do |index|
+      if index < 0 || index >= permutation.size || seen[index]
+        raise ArgumentError.new("m permutation is not a bijection")
+      end
+      seen[index] = true
+    end
+  end
 end
