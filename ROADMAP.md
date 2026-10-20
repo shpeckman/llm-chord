@@ -116,16 +116,28 @@ the host manager.
   descriptions, fingerprints, `hash64`, normalization and identities,
   `coverage` (every outcome), and `fits` in both directions.
 
-## Phase 4 — single-process runtime
+## Phase 4 — single-process runtime ✅
 
-- Objects: factory `self` (`state`, `derive`, `resource`, `on`, `task`),
-  lifetimes and linger, principals and variants, references.
-- `Cell` / `Derived` with hydration, write guards, snap/ops/reset events; the
-  publication queue.
-- Registries, `create_host` / `serve` / `root`, `define_facet` /
-  `define_registry`.
-- Acceptance: upstream's `tutorial.test.ts` over memory links.
-- Code version is a host attribute pinnable to a process (decision 3).
+- Objects: the factory's `ObjectScope` (upstream's `self`: `state` with initial
+  values or `init`, `get`, `resource`, `on`, `task`, `derive`, `register`,
+  `expose`), activation as one transaction with unwinding, lifetimes
+  (`referenced` with linger, `host`), principals and principal keys, variants,
+  references with late binding, `accepts` adapters, cycle detection, forced
+  disposal holders-first, `invalidate_principal` on local objects.
+- `Cell` / `Derived` with hydration, write guards, dev-mode validation,
+  snap/ops/reset events; the publication queue.
+- Registries, `create_host` / `serve` / `install` / `load` / `ready` / `get` /
+  `hold` / `root`, `define_facet` / `define_registry`.
+- Acceptance: upstream's `tutorial.test.ts` sections 01–05, 07, 08, 10 and 11
+  in a single process, plus the single-process cases of `state`, `state-init`,
+  `host`, `readiness` and `principals`. Section 06 needs memory links and moves
+  to Phase 5; section 09 needs reload and moves to Phase 7.
+- Code version is a host attribute (`Host#code_version`, carried by every
+  `Ctx`), pinnable to a process (decision 3); it stays 1 until reload.
+- Deferred to the phases that need them: remote bindings, consumer-side
+  linger and `GetOptions.state` (Phase 5); code-version retirement, gates,
+  leases, staged listeners, `StateOptions` (`version`, `migrate`) and
+  `Cell#reset` (Phase 7).
 
 ## Phase 5 — wire protocol and links
 
@@ -137,6 +149,8 @@ the host manager.
 - Relays and routes: `route` / `authorize` / `resolve`, principal stamping.
 - Conformance: Crystal and Node hosts linked to each other over IPC and
   WebSocket links, per decision 1.
+- Acceptance: `tutorial.test.ts` section 06 (remote methods and live state over
+  a memory link).
 
 ## Phase 6 — cluster and process management
 
@@ -149,6 +163,8 @@ the host manager.
 - Process-level reload from decision 3, following upstream spec §7: load (start
   the new worker binary), prepare/vote, gate, migrate, commit, retire; the edge
   cases in the spec's "Decisions".
+- Acceptance: `tutorial.test.ts` section 09 (compatible reload, migration and
+  an old-contract adapter).
 
 ## Phase 8 — SQLite and telemetry storage
 

@@ -152,7 +152,9 @@ module LLM::Chord
       end
     end
 
-    def variants : Hash(String, Hash(String, MemberDescription))
+    getter variants : Hash(String, Hash(String, MemberDescription)) { build_variants }
+
+    private def build_variants : Hash(String, Hash(String, MemberDescription))
       result = {} of String => Hash(String, MemberDescription)
       @json["variants"]?.try(&.as_h?).try &.each do |kind, members|
         result[kind] = members.as_h?.try(&.transform_values { |member| MemberDescription.new(member) }) || {} of String => MemberDescription

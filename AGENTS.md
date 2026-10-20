@@ -4,11 +4,13 @@
 
 `llm-chord` is a Crystal port of
 [`@earendil-works/chord`](https://github.com/earendil-works/pi/tree/main/packages/chord).
-It is being ported in phases tracked in `ROADMAP.md`. Phases 1–3 are done:
+It is being ported in phases tracked in `ROADMAP.md`. Phases 1–4 are done:
 the delta module, replicated state, Context (values, cancellation,
 telemetry), the telemetry contracts and in-memory recorder, errors, output,
-schemas, and contracts follow upstream semantics. Objects, hosts, links,
-reload, and SQLite are not ported yet. Values are `JSON::Any`.
+schemas, contracts, and the single-process runtime (hosts, objects, cells,
+references, roots, facets, registries) follow upstream semantics. Links,
+relays, reload, cluster management, and SQLite are not ported yet. Values are
+`JSON::Any`.
 
 The one dependency is the `typebox` shard (`path: ../typebox`), a port of
 TypeBox 1.3.27's builders and `Value` functions. Schema behavior belongs
@@ -39,6 +41,19 @@ src/llm/chord/delta/tracker.cr     Overlay, Change, Prepared, Tracker, track
 src/llm/chord/state.cr             replicated_state: publisher, subscribers, mutable and attached state
 src/llm/chord/schema.cr            canonical_json, hash64, normalize, canonical_identity, assert_valid, fits?
 src/llm/chord/contract.cr          method/opaque, placement, remote/local, Description, coverage, bind
+src/llm/chord/future.cr            Future(T) (promise analogue on fibers), race, await_all
+src/llm/chord/publish.cr           Publish: the one FIFO queue for every observer notification
+src/llm/chord/readable.cr          RefStatus, Shape, StateEvent, Subscribable, Readable, Listeners(T), json_value
+src/llm/chord/cell.cr              Fanout, Source, Cell (boxed tracker), Derived, compute_dependents
+src/llm/chord/registry.cr          Registry(V), RegistryValue(V), RegistryView(V), define_registry
+src/llm/chord/resource.cr          AnyResource, Resource(T), Exposed
+src/llm/chord/implementation.cr    Implementation builder, MethodFn, OpaqueBox(T)
+src/llm/chord/ctx.cr               Ctx (call context), linked_signal, await_ready
+src/llm/chord/ref.cr               Ref (references), MemberReadable (late-bound state members)
+src/llm/chord/object.cr            Service, Decls, Run, Installed, ObjectImpl (activation, calls, disposal)
+src/llm/chord/scope.cr             ObjectScope: what a factory declares (upstream's `self`)
+src/llm/chord/facet.cr             Facet, define_facet, FacetApi
+src/llm/chord/host.cr              Host: services, addresses, roots, registries, principals, close
 spec/                              Crystal specs, largely translated from upstream tests
 bench/                             Release-mode micro-benchmarks
 ROADMAP.md                         Porting phases and settled design decisions
@@ -127,5 +142,35 @@ The specs never hit the network.
 - Contracts keep descriptions as raw JSON (`Description#json`) so a received
   token fingerprints exactly as sent; typed accessors read from it. Build
   descriptions only in `remote` / `local`, in upstream's key order.
-- `bind` is generic over the adapter type (`Hash(Int32, A)`), so Phase 4
-  decides what an adapter is without touching contracts.
+- `bind` is generic over the adapter type (`Hash(Int32, A)`); the runtime's
+  adapter is `Proc(Implementation, Implementation)`. `Description#variants` is
+  memoized: the runtime reads it on every call.
+- Runtime internals are `protected`: Crystal lets types in the same namespace
+  (`LLM::Chord`) call them, while user code cannot. Keep new internals
+  `protected` or `private` rather than public.
+- The runtime is single-threaded like upstream's event loop: `Publish` and the
+  host's counters are unsynchronized. Upstream's synchronous prefix of an async
+  function (an activation's factory, a disposal's status change, an
+  invocation's registration) runs in the caller; the rest is spawned. Track a
+  spawned invocation before spawning (`ObjectImpl#track`) so disposal waits
+  for it.
+- `Future(T)` stands in for promises. Its `on_settle` callbacks run
+  synchronously at settlement, in registration order (activation success
+  makes references live before `ready` resolves, as upstream's `then` chain
+  does). `wait(signals, timeout)` returns an `Outcome` instead of raising, so
+  callers build upstream's exact errors.
+- Cells track `{"v" => value}` because the tracker needs container roots;
+  `Cell.unbox` strips the box from published ops (an op on the value itself
+  becomes `r`). Derived values start as `nil` (upstream's `undefined`), so their
+  first install publishes `r`.
+- `Listeners(T)` keeps listeners by integer id: callers snapshot before
+  delivering and skip ids removed meanwhile, as upstream does with `Set`
+  membership.
+- Not yet ported (later phases): remote bindings and `GetOptions.state`
+  (Phase 5), code-version retirement, gates, leases, `StateOptions` and
+  `reload` (Phase 7). `Host#code_version` stays 1 and admission only checks it.
+- The Phase 4 acceptance spec is `spec/tutorial_spec.cr`: upstream's
+  `tutorial.test.ts` sections 01–05, 07, 08, 10 and 11 (06 needs memory links,
+  09 reload). `spec/cell_spec.cr`, `state_init_spec.cr`, `host_spec.cr` and
+  `readiness_spec.cr` translate the single-process cases of the matching
+  upstream tests.

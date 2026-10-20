@@ -21,8 +21,12 @@ The port currently covers chord's foundation layer:
   canonical JSON, `hash64`, input normalization and identity, and the `fits?`
   compatibility rule. Schemas are built with the `typebox` shard, which emits
   the same JSON Schema as TypeBox.
+- `LLM::Chord::Host` — chord's single-process runtime: objects with cells,
+  derivations, resources, listeners and tasks; references with variants,
+  late binding and `accepts` adapters; roots and call contexts; lifetimes and
+  linger; principals; facets; registries.
 
-Objects, hosts, links, reload, and SQLite are not ported yet; see
+Links, relays, reload, cluster management, and SQLite are not ported yet; see
 [ROADMAP.md](ROADMAP.md). Values are Crystal's `JSON::Any`.
 
 ## Requirements
@@ -354,6 +358,177 @@ validates one. `C.takes_no_args?(contract, name)` tells how a method is called.
 | `assert_valid(reason, what, schema, value)` | raises `invalid/<reason>` with the first three errors |
 | `fits?(sub, sup)` | conservative structural subtyping used by coverage |
 
+## Objects and hosts
+
+A host serves types. An object is one instance of a type at an address: the
+type, its normalized input, and the principal it was created for. Its factory
+runs once and returns the implementation; references reach the object through
+the consumer's contract.
+
+```crystal
+T = TypeBox::Type
+C = LLM::Chord
+
+Rows = T.array(T.object({text: T.string, done: T.boolean}))
+
+TodoStore = C.local("todos", version: 1, input: T.object({list: T.string}), members: {
+  label:     C.method(nil, T.string),
+  rows:      Rows,
+  openCount: T.number,
+  add:       C.method(T.object({text: T.string})),
+})
+
+host = C.create_host(self: "server")
+
+host.serve(TodoStore) do |input, _principal, scope|
+  rows = scope.state("rows", Rows, [] of JSON::Any)
+  open_count = scope.derive([rows]) { |(todos)| todos.as_a.count { |todo| !todo["done"].as_bool } }
+  C::Implementation.new
+    .method("label") { "Todos for #{input["list"]}" }
+    .state("rows", rows)
+    .state("openCount", open_count)
+    .method("add") { |args, ctx| rows.change(ctx) { |draft| draft << {text: args.not_nil!["text"], done: false} } }
+end
+
+todos = host.get(TodoStore, {list: "family"})
+stop = todos.state("openCount").subscribe { |count| puts count }   # 0, then 1
+host.root { |ctx| todos.call("add", {text: "Buy milk"}, ctx) }
+todos.call("label")                                                   # => "Todos for family"
+stop.call
+todos.release
+host.close
+```
+
+### Hosts
+
+`C.create_host(**options)` is `Host.new(**options)`:
+
+| Option | Meaning |
+| --- | --- |
+| `self` (required) | The principal of the host's own code: its roots, code inside its objects, and its host-lifetime objects. |
+| `name` | Default `"host"`. Remote types must be placed on it to be served here. |
+| `principal_key` | `Proc(JSON::Any, String)` mapping a principal to its object key. Default: canonical JSON. A principal with the same key as `self` is the host's own. |
+| `dev` | Validates every cell write, and every value exposed as a remote state member, against its schemas. |
+| `on_error` | Receives errors from background work (disposal, listeners, tasks, host objects). Default: printed to `STDERR`. |
+| `ready_timeout` | How long an activation waits for its references to be ready and hydrated, and an awaited `get` for its reference (`unavailable/ready_timeout`). Default 60 s; `nil` waits forever. |
+
+Principals and inputs are anything that serializes to JSON (named tuples,
+hashes, strings, `JSON::Any`).
+
+- `serve(contract, lifetime:, linger:, accepts:) { |input, principal, scope| implementation }`
+  registers a factory. `lifetime: :host` creates the type's one object at once
+  (a local type whose input accepts `{}`); every `get` reaches it, it is created
+  for the host principal, and only such objects may register into registries.
+  A referenced object is disposed when its last reference is released, after
+  `linger`. `accepts` maps older consumer versions to adapters
+  (`Proc(Implementation, Implementation)`).
+- `get(type, input = nil, principal: nil, signal: nil)` blocks until the
+  reference is ready (live, with its state members hydrated) and returns it.
+  It raises the activation error, `aborted`, or `unavailable/ready_timeout`,
+  and releases the reference then. `hold` returns the reference at once, maybe
+  still `loading`.
+- `root(principal: nil, signal: nil) { |ctx| ... }` runs a call tree and
+  returns the block's value. References taken with `ctx.get` are released when
+  the root ends.
+- `install(facet, await_host_objects: true)`, `load(facets, await_host_objects: true)`
+  and `ready` start and await host-lifetime objects; `load` installs every
+  facet before awaiting any.
+- `invalidate_principal { |principal| bool }` or `invalidate_principal(pattern)`
+  force-disposes the objects of matching principals (never the host's own);
+  a pattern matches principals whose listed fields are deep-equal.
+- `close` disposes every object, holders before what they hold.
+
+### Factories
+
+The factory gets the normalized input, the principal, and an `ObjectScope`
+(chord's `self`) through which it declares what the object owns. Names are
+unique per kind, and declarations are validated at activation.
+
+| Declaration | Meaning |
+| --- | --- |
+| `scope.state(name, schema, initial)` | A cell with an initial value (always validated). |
+| `scope.state(name, schema) { \|ctx\| value }` | A cell filled by an init that runs in its own root after the object's resources are open and its references live, before the object goes live. |
+| `scope.get(type, input = nil, principal: nil)` | A reference the object holds for its lifetime. Holding cycles raise `invalid/cycle`. |
+| `scope.resource(name, version:, deps:, exclusive:, close:) { \|signal\| value }` | Opened before the object goes live (after its `deps`, references or resources), closed in reverse order after it is disposed. `value` raises `not_ready` while any factory runs. |
+| `scope.on(name, source) { \|event, ctx\| }` | A listener on a readable (current value, then every new one) or a `Subscribable`. `on(name, resource)` listens to the resource's value; `on(name, resource, selector)` to `selector.call(value)`. Each event runs in a fresh root. |
+| `scope.task { \|ctx\| }` | Long-running work of the live object, aborted at disposal. Calls made with its ctx start fresh roots. |
+| `scope.derive(sources) { \|values\| value }` | A synchronous projection of readables, recomputed atomically with object writes and on publication of other sources. |
+| `scope.register(registry, entries)` | Registry entries (host-lifetime objects only). |
+| `scope.expose(resource)` | A member backed by a resource's value. |
+
+The factory returns an `Implementation`: `Implementation.new(variant = nil)`
+with `method(name) { |args, ctx| result }`, `state(name, readable)`,
+`expose(name, exposed)`, and `opaque(name, value)`, plus `[]`, `[]?`, `[]=`,
+`delete`, `keys`, `dup` and `variant=` for adapters. Method results convert to
+JSON; `nil` means no result. A remote contract's implementation names its
+variant and may only contain that variant's members.
+
+### References
+
+| Member | Meaning |
+| --- | --- |
+| `call(name, args = nil, ctx = nil)` | Calls a method and returns its result (`JSON::Any?`). Without a ctx, or with a task's, it runs in a fresh root. Remote arguments and results are validated at the provider. |
+| `state(name)` | A late-bound `Readable` following the member: reading raises `not_ready` until live and `not_in_variant` outside the variant. A listener added early gets its snapshot once live; a changed source is announced as a reset. |
+| `opaque(name, T)` | An opaque or exposed member as `T`. |
+| `status`, `ready`, `error` | `RefStatus` (`Loading`, `Live`, `Released`, `Gone`), a `Future(Nil)`, and why the reference is gone. |
+| `variant`, `shape`, `on_shape`, `on_status` | The current variant and shape, and listeners for their changes. |
+| `release` | Releases the reference; calls then raise `released`. |
+
+`Future(T)` has `wait` (blocks, raising a rejection), `await_settled`,
+`settled?`, `rejected?`, `error`, `on_settle`, and `Future.run { }` to run a
+block on its own fiber.
+
+### Cells and derivations
+
+`Cell#change(ctx) { |draft| }` mutates a `Delta::Draft` of the value and
+publishes exactly the changed paths. `Cell#update(ctx) { |value| new_value }`
+replaces the value with the block's result, always validated.
+`Cell#replace(ctx, value, diff: nil)` replaces the whole value: subscribers get
+a structural diff when `diff` is true, or by default when the new value shares
+containers with the old one, and otherwise one `r` op. Cells reject writes
+while a factory runs (`invalid/read_only`).
+
+Readables (`Cell`, `Derived`, reference members) have `value`,
+`subscribe { |value| }` (current value at once, then each new one) and
+`events { |event| }`: a `StateEvent` with `kind` (`Snap`, `Ops`, `Reset`),
+`value` and `ops`. Each write adopts its revision and every derived one before
+any observer runs, and notifications are delivered in adoption order, so a
+re-entrant write never overtakes the one being published.
+
+### Contexts
+
+A `Ctx` has `signal`, `root_id`, `code_version`, `principal` (the caller at
+ingress, the host inside objects) and `get(type, input = nil, principal: nil)`.
+A ctx expires when its call settles: using it later raises `aborted/expired`.
+
+### Facets and registries
+
+```crystal
+Actions = C.define_registry(Proc(C::Ctx, Int64), "actions")
+Menu = C.local("menu", version: 1, input: T.object)
+
+store = C.define_facet("store") { |api| api.serve(TodoStore) { |input, principal, scope| todo_store(input, scope) } }
+menu = C.define_facet("menu", uses: [TodoStore]) do |api|
+  api.serve(Menu, lifetime: :host) do |_input, _principal, scope|
+    todos = scope.get(TodoStore, {list: "family"})
+    scope.register(Actions, {
+      "addSample" => ->(ctx : C::Ctx) { todos.call("add", {text: "Try"}, ctx); todos.state("openCount").value.as_i64 },
+    })
+    C::Implementation.new
+  end
+end
+
+host.load([menu, store])
+host.root { |ctx| host.registry(Actions).get("addSample", ctx).try &.call(ctx) }
+```
+
+`todo_store(input, scope)` stands for the factory body of the first example.
+A `FacetApi` has `serve`, `root`, `registry`, `name`, and `signal` (aborted
+when the facet is removed or the host closes). `define_registry(V, name,
+conflict: :error)` refuses two objects registering one key; `:last` keeps the
+later one. `RegistryView` has `table(ctx = nil)`, `get(key, ctx = nil)` and
+`subscribe { |table, code_version| }`; tables keep registration order.
+
 ## Replicated state
 
 ```crystal
@@ -434,6 +609,23 @@ and reports to `on_error` (an `AggregateError` when disposal also fails).
 - `LLM::Chord.replicated_state(source, on_error = nil) : AttachedReplicatedState` (`#value`, `#subscribe`, `#dispose`)
 - `Delivery`, `DeliveryKind`, `StateListener`, `ErrorReporter`, `AggregateError`,
   `Snapshot`, `SourceFrame`, `ReplicatedStateSource`, `ReplicatedStateSourceAttachment`
+- `LLM::Chord.create_host`, `Host` (`#name`, `#principal`, `#dev?`, `#ready_timeout`,
+  `#code_version`, `#previous_code_version`, `#serve`, `#install`, `#load`, `#ready`,
+  `#get`, `#hold`, `#root`, `#registry`, `#invalidate_principal`, `#report`, `#close`),
+  `Lifetime`, `Accepts`, `Adapter`
+- `ObjectScope` (`#state`, `#get`, `#resource`, `#on`, `#task`, `#derive`, `#register`,
+  `#expose`), `Implementation`, `MethodFn`, `MemberValue`, `OpaqueValue`, `OpaqueBox(T)`,
+  `Exposed`, `Resource(T)` (`#key`, `#value`, `#version`, `#deps`, `#exclusive?`),
+  `Subscribable`
+- `Ref` (`#call`, `#state`, `#opaque`, `#contract`, `#address`, `#status`, `#ready`,
+  `#error`, `#variant`, `#shape`, `#on_shape`, `#on_status`, `#release`), `RefStatus`,
+  `Shape`, `Ctx` (`#signal`, `#root_id`, `#code_version`, `#principal`, `#holder?`,
+  `#closed?`, `#get`)
+- `Readable` (`#value`, `#subscribe`, `#events`), `Cell` (`#change`, `#update`, `#replace`,
+  `#schema`), `Derived`, `StateEvent`
+- `Future(T)`, `LLM::Chord.race`, `.await_all`, `.not_ready`
+- `Facet`, `LLM::Chord.define_facet`, `FacetApi`, `Registry(V)`, `RegistryConflict`,
+  `RegistryView(V)`, `LLM::Chord.define_registry`
 
 ## Differences from chord
 
@@ -458,6 +650,22 @@ and reports to `on_error` (an `AggregateError` when disposal also fails).
   `ArgumentError` where chord throws `TypeError`, and `def` is `definition`.
 - Schema behavior inherits the `typebox` shard's documented differences from
   TypeBox (see its README).
+- Factories receive an `ObjectScope` (chord's `self`, a Crystal keyword) and
+  return an `Implementation` builder. References expose members through
+  `call`, `state` and `opaque` instead of a JavaScript proxy.
+- `Cell#change` ignores its block's value, since Crystal draft mutators return
+  values; returning a new value is `Cell#update`.
+- Factories, methods, inits, tasks and listeners are ordinary Crystal code.
+  Awaiting a promise becomes blocking a fiber; activations, disposals,
+  listener invocations and tasks run on their own fibers. Chord's async-factory
+  check has no equivalent.
+- `linger` and `ready_timeout` are `Time::Span`s.
+- Facets are values: Crystal cannot load code at runtime, so module paths and
+  loaders do not apply (see the roadmap's reload decision).
+- Until links are ported, a remote type placed on another host raises
+  `unavailable` ("no route to …") at `get`/`hold`, `GetOptions.state` is not
+  offered, and `invalidate_principal` disposes local objects only. State
+  versions, `migrate`, and `reload` come with reload.
 
 ## Development
 
