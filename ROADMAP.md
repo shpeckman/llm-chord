@@ -116,39 +116,74 @@ the host manager.
   descriptions, fingerprints, `hash64`, normalization and identities,
   `coverage` (every outcome), and `fits` in both directions.
 
-## Phase 4 — single-process runtime
+## Phase 4 — single-process runtime ✅
 
-- Objects: factory `self` (`state`, `derive`, `resource`, `on`, `task`),
-  lifetimes and linger, principals and variants, references.
-- `Cell` / `Derived` with hydration, write guards, snap/ops/reset events; the
-  publication queue.
-- Registries, `create_host` / `serve` / `root`, `define_facet` /
-  `define_registry`.
-- Acceptance: upstream's `tutorial.test.ts` over memory links.
-- Code version is a host attribute pinnable to a process (decision 3).
+- Objects: the factory's `ObjectScope` (upstream's `self`: `state` with initial
+  values or `init`, `get`, `resource`, `on`, `task`, `derive`, `register`,
+  `expose`), activation as one transaction with unwinding, lifetimes
+  (`referenced` with linger, `host`), principals and principal keys, variants,
+  references with late binding, `accepts` adapters, cycle detection, forced
+  disposal holders-first, `invalidate_principal` on local objects.
+- `Cell` / `Derived` with hydration, write guards, dev-mode validation,
+  snap/ops/reset events; the publication queue.
+- Registries, `create_host` / `serve` / `install` / `load` / `ready` / `get` /
+  `hold` / `root`, `define_facet` / `define_registry`.
+- Acceptance: upstream's `tutorial.test.ts` sections 01–05, 07, 08, 10 and 11
+  in a single process, plus the single-process cases of `state`, `state-init`,
+  `host`, `readiness` and `principals`. Section 06 needs memory links and moves
+  to Phase 5; section 09 needs reload and moves to Phase 7.
+- Code version is a host attribute (`Host#code_version`, carried by every
+  `Ctx`), pinnable to a process (decision 3); it stays 1 until reload.
+- Deferred to the phases that need them: remote bindings, consumer-side
+  linger and `GetOptions.state` (done in Phase 5); code-version retirement, gates,
+  leases, staged listeners, `StateOptions` (`version`, `migrate`) and
+  `Cell#reset` (Phase 7).
 
-## Phase 5 — wire protocol and links
+## Phase 5 — wire protocol and links ✅
 
-- Frames and connections: validation, holds, units and state streams,
-  per-stream delta encoders, flow control (`acks`, window, `pendingCap`, slot
-  coalescing), `max_calls`, ping/pong.
-- Links: memory, IPC (Unix socketpair or pipes, line-delimited JSON),
-  WebSocket (`HTTP::WebSocket`, plus an `accept_web_sockets` equivalent).
-- Relays and routes: `route` / `authorize` / `resolve`, principal stamping.
-- Conformance: Crystal and Node hosts linked to each other over IPC and
-  WebSocket links, per decision 1.
+- Frames and connections (`wire.cr`, `connection.cr`): protocol version 4,
+  frame validation against the frame schema, hello and mismatch handling,
+  holds, units and state streams with per-stream delta encoders, flow control
+  (`acks`, window, `pending_cap`, unit and state slots with coalescing and
+  resets), `max_calls`, ping/pong, packed (deflated) payloads above 64 KiB.
+- Remote references (`remote.cr`): shared bindings per host, principal key and
+  fingerprint; views by variant; `GetOptions.state` (`state: false`);
+  consumer-side linger (`linger`, `linger_cap`); re-hold after reconnect.
+- Links (`link.cr`, `websocket.cr`): memory, IPC (Node's channel format: one
+  JSON message per line, `{"chord2": frame}`), WebSocket (`HTTP::WebSocket`,
+  binary messages for packed frames) and `accept_web_sockets`.
+- Relays and routes: `route` / `authorize` / `resolve`, principal stamping and
+  restamping, `invalidate_principal` propagation.
+- Acceptance: `tutorial.test.ts` section 06, plus the link cases of `bindings`,
+  `flow`, `flow-units`, `placement`, `awaiting`, `remote` and `links-review`.
+- Conformance: `conformance/` links Crystal and Node hosts (a Node server with
+  a Crystal child over IPC; a Node browser on a Crystal server over a
+  WebSocket). It type-checks but has not yet been run against upstream's
+  sources; the Crystal side of Node IPC framing is covered by
+  `spec/fixtures/node_child.mjs`.
+- Deferred to Phase 7: reconciliation of children on older code versions
+  (such a child's link is closed) and reload frames (`prepare` is answered with
+  a failed vote, `unavailable/reload_unsupported`).
 
-## Phase 6 — cluster and process management
+## Phase 6 — cluster and process management ✅
 
-- `create_host_manager`, fork driver on `Process.new`, child control channel,
-  liveness reports, process-group kill.
-- `process_lock` (Linux abstract-namespace Unix socket).
+- `create_host_manager` with start/stop/replace serialized, ready timeout,
+  keep-alive checks over `Liveness`, and `on_exit`.
+- The fork driver on `posix_spawn`: the child leads its own process group,
+  gets the IPC socket on fd 3 (`NODE_CHANNEL_FD`), and the group is killed when
+  the leader exits or ignores shutdown past the grace period. It runs an
+  executable with arguments, so a Node child is `node` plus its script.
+- `child_control`: init, lock, ready, fatal, status reports, shutdown.
+- `process_lock`: a Linux abstract-namespace Unix socket named like upstream's,
+  a socket file in the temporary directory elsewhere.
 
 ## Phase 7 — reload
 
 - Process-level reload from decision 3, following upstream spec §7: load (start
   the new worker binary), prepare/vote, gate, migrate, commit, retire; the edge
   cases in the spec's "Decisions".
+- Acceptance: `tutorial.test.ts` section 09 (compatible reload, migration and
+  an old-contract adapter).
 
 ## Phase 8 — SQLite and telemetry storage
 

@@ -4,11 +4,14 @@
 
 `llm-chord` is a Crystal port of
 [`@earendil-works/chord`](https://github.com/earendil-works/pi/tree/main/packages/chord).
-It is being ported in phases tracked in `ROADMAP.md`. Phases 1–3 are done:
+It is being ported in phases tracked in `ROADMAP.md`. Phases 1–6 are done:
 the delta module, replicated state, Context (values, cancellation,
 telemetry), the telemetry contracts and in-memory recorder, errors, output,
-schemas, and contracts follow upstream semantics. Objects, hosts, links,
-reload, and SQLite are not ported yet. Values are `JSON::Any`.
+schemas, contracts, the single-process runtime (hosts, objects, cells,
+references, roots, facets, registries), the wire protocol and links (memory,
+IPC, WebSocket; relays and routes), and child host processes (host manager,
+fork driver, child control, process lock) follow upstream semantics. Reload
+and SQLite are not ported yet. Values are `JSON::Any`.
 
 The one dependency is the `typebox` shard (`path: ../typebox`), a port of
 TypeBox 1.3.27's builders and `Value` functions. Schema behavior belongs
@@ -39,7 +42,28 @@ src/llm/chord/delta/tracker.cr     Overlay, Change, Prepared, Tracker, track
 src/llm/chord/state.cr             replicated_state: publisher, subscribers, mutable and attached state
 src/llm/chord/schema.cr            canonical_json, hash64, normalize, canonical_identity, assert_valid, fits?
 src/llm/chord/contract.cr          method/opaque, placement, remote/local, Description, coverage, bind
+src/llm/chord/future.cr            Future(T) (promise analogue on fibers), race, await_all
+src/llm/chord/publish.cr           Publish: the one FIFO queue for every observer notification
+src/llm/chord/readable.cr          RefStatus, Shape, StateEvent, Subscribable, Readable, Listeners(T), json_value
+src/llm/chord/cell.cr              Fanout, Source, Cell (boxed tracker), Derived, compute_dependents
+src/llm/chord/registry.cr          Registry(V), RegistryValue(V), RegistryView(V), define_registry
+src/llm/chord/resource.cr          AnyResource, Resource(T), Exposed
+src/llm/chord/implementation.cr    Implementation builder, MethodFn, OpaqueBox(T)
+src/llm/chord/ctx.cr               Ctx (call context), linked_signal, await_ready
+src/llm/chord/ref.cr               Ref (shared reference API), LocalRef, MemberReadable
+src/llm/chord/remote.cr            RemoteBinding (shared hold), ViewReadable, RemoteRef
+src/llm/chord/object.cr            Service, Decls, Run, Installed, ObjectImpl (activation, calls, disposal)
+src/llm/chord/scope.cr             ObjectScope: what a factory declares (upstream's `self`)
+src/llm/chord/facet.cr             Facet, define_facet, FacetApi
+src/llm/chord/host.cr              Host: services, addresses, roots, registries, principals, links, routes, close
+src/llm/chord/wire.cr              PROTOCOL_VERSION, Frame, Packed, Wire (schema, errors, encodings)
+src/llm/chord/link.cr              Link, BaseLink, MemoryLink, IpcChannel, IpcLink
+src/llm/chord/connection.cr        LinkOptions, Connection: hello, holds, units, flow control, calls, relays
+src/llm/chord/websocket.cr         WebSocketLink, accept_web_sockets
+src/llm/chord/manager.cr           Fork driver (posix_spawn), HostManager, ChildControl, process_lock
 spec/                              Crystal specs, largely translated from upstream tests
+spec/fixtures/                     Child processes for the manager specs (Crystal worker, Node child)
+conformance/                       Crystal ↔ Node link conformance harness (run.sh, needs CHORD_SRC)
 bench/                             Release-mode micro-benchmarks
 ROADMAP.md                         Porting phases and settled design decisions
 .ameba.yml                         Ameba linter config
@@ -56,7 +80,10 @@ crystal run bench/bench.cr --release
 
 `ameba` reads `.ameba.yml`; three rules are disabled there:
 `Naming/QueryBoolMethods`, `Lint/NotNil`, and `Metrics/CyclomaticComplexity`.
-The specs never hit the network.
+The specs never hit the network; the WebSocket specs listen on 127.0.0.1 and
+`spec/manager_spec.cr` builds `spec/fixtures/worker.cr` into the temporary
+directory. The Node child spec is pending when `node` is missing.
+`conformance/run.sh` needs upstream chord's sources in `CHORD_SRC`.
 
 ## Code standards
 
@@ -127,5 +154,48 @@ The specs never hit the network.
 - Contracts keep descriptions as raw JSON (`Description#json`) so a received
   token fingerprints exactly as sent; typed accessors read from it. Build
   descriptions only in `remote` / `local`, in upstream's key order.
-- `bind` is generic over the adapter type (`Hash(Int32, A)`), so Phase 4
-  decides what an adapter is without touching contracts.
+- `bind` is generic over the adapter type (`Hash(Int32, A)`); the runtime's
+  adapter is `Proc(Implementation, Implementation)`. `Description#variants` is
+  memoized: the runtime reads it on every call.
+- Runtime internals are `protected`: Crystal lets types in the same namespace
+  (`LLM::Chord`) call them, while user code cannot. Keep new internals
+  `protected` or `private` rather than public.
+- The runtime is single-threaded like upstream's event loop: `Publish` and the
+  host's counters are unsynchronized. Upstream's synchronous prefix of an async
+  function (an activation's factory, a disposal's status change, an
+  invocation's registration) runs in the caller; the rest is spawned. Track a
+  spawned invocation before spawning (`ObjectImpl#track`) so disposal waits
+  for it.
+- `Future(T)` stands in for promises. Its `on_settle` callbacks run
+  synchronously at settlement, in registration order (activation success
+  makes references live before `ready` resolves, as upstream's `then` chain
+  does). `wait(signals, timeout)` returns an `Outcome` instead of raising, so
+  callers build upstream's exact errors.
+- Cells track `{"v" => value}` because the tracker needs container roots;
+  `Cell.unbox` strips the box from published ops (an op on the value itself
+  becomes `r`). Derived values start as `nil` (upstream's `undefined`), so their
+  first install publishes `r`.
+- `Listeners(T)` keeps listeners by integer id: callers snapshot before
+  delivering and skip ids removed meanwhile, as upstream does with `Set`
+  membership.
+- Not yet ported (Phase 7): code-version retirement, gates, leases,
+  `StateOptions`, `reload`, child reconciliation and reload frames.
+  `Host#code_version` stays 1 and admission only checks it.
+- The acceptance spec is `spec/tutorial_spec.cr`: upstream's
+  `tutorial.test.ts` sections 01–08, 10 and 11 (09 needs reload). `spec/cell_spec.cr`, `state_init_spec.cr`, `host_spec.cr` and
+  `readiness_spec.cr` translate the single-process cases of the matching
+  upstream tests.
+- `Link` collides with Crystal's top-level `@[Link]` annotation: specs and
+  any code including `LLM::Chord` write `LLM::Chord::Link`.
+- Frames are `Frame` objects (fields plus an optional `Packed` payload), built
+  through `Wire`/`Frame` helpers, never raw hashes; `Frame.state` exists
+  because `as` cannot be a named argument. Size accounting is UTF-8 bytes.
+- Connection bookkeeping lives in `Connection`; the host owns bindings, routes,
+  linger and invalidation. A new frame type touches `Wire::FRAME_SCHEMA` and
+  `Connection#dispatch`.
+- `create_host` is a macro and `LinkOptions` takes any `Int`, because symbol
+  and number autocasts are lost through `**options` forwarding.
+- The fork driver binds `posix_spawn` in `LibChordSpawn`; the child is awaited
+  through `Process.new(Crystal::System::Process.new(pid))`. IPC is Node's
+  `json` serialization over fd 3, so Crystal and Node children are
+  interchangeable.

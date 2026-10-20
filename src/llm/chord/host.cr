@@ -1,0 +1,688 @@
+# src/llm/chord/host.cr
+module LLM::Chord
+  class Route
+    getter authorize : Proc(JSON::Any, String, Bool)
+    getter resolve : Proc(String, Link)
+    getter principal : Proc(String, JSON::Any)
+
+    def initialize(*, authorize : Proc(JSON::Any, String, A), resolve : Proc(String, L), principal : Proc(String, P)) forall A, L, P
+      @authorize = Route.authorizer(authorize)
+      @resolve = Route.resolver(resolve)
+      @principal = Route.stamper(principal)
+    end
+
+    protected def self.authorizer(authorize : Proc(JSON::Any, String, A)) : Proc(JSON::Any, String, Bool) forall A
+      ->(principal : JSON::Any, host : String) { authorize.call(principal, host) == true }
+    end
+
+    protected def self.resolver(resolve : Proc(String, L)) : Proc(String, Link) forall L
+      ->(host : String) { resolve.call(host).as(Link) }
+    end
+
+    protected def self.stamper(principal : Proc(String, P)) : Proc(String, JSON::Any) forall P
+      ->(host : String) { Chord.json_value(principal.call(host)) }
+    end
+  end
+
+  record Upstream, link : Link, principal : JSON::Any, options : LinkOptions
+
+  def self.upstream(link : Link, *, principal, **options) : Upstream
+    Upstream.new(link, json_value(principal), LinkOptions.new(**options))
+  end
+
+  class Host
+    EMPTY_TABLE = RegistryTable.new
+
+    getter name : String
+    getter? dev : Bool
+    getter principal : JSON::Any
+    getter ready_timeout : Time::Span?
+    getter kind : PeerKind
+    getter code_version = 1
+    getter connections = ::Set(Connection).new
+    getter upstream : Connection? = nil
+    protected property in_factory = 0
+    protected getter source_options : SourceOptions { SourceOptions.new(@dev, ->(error : Exception) { report(error) }) }
+    @objects = {} of String => ObjectImpl
+    @dying = {} of String => ObjectImpl
+    @facets = {} of String => Facet
+    @facet_runs = {} of String => AbortController
+    @host_objects = {} of String => Ref
+    @services = {} of String => Service
+    @tables = {} of String => RegistryTable
+    @order = {} of String => Hash(String, Int32)
+    @subscribers = {} of String => Listeners(TableListener)
+    @bindings = {} of String => RemoteBinding
+    @lingering = {} of String => RemoteBinding
+    @routes = {} of String => Route
+    @roots = {} of String => Int32
+    @local = ::Set(String).new
+    @foreign = {} of String => ::Set(Connection)
+    @root_links = {} of String => ::Set(Connection)
+    @retire_allowed = 0
+    @origin_seq = 0
+    @root_seq = 0_i64
+    @incarnation : String = Random.new.hex(3)
+    @principal_key : Proc(JSON::Any, String)
+    @self_key : String
+    @on_error : Reporter
+    @linger_types : Hash(String, Time::Span)
+    @linger_cap : Int32
+
+    def initialize(*, self principal, @name : String = "host", principal_key : Proc(JSON::Any, String)? = nil,
+                   @dev : Bool = false, on_error = nil, @ready_timeout : Time::Span? = 60.seconds,
+                   @kind : PeerKind = PeerKind::Host, upstream : Upstream? = nil,
+                   linger : Hash(String, Time::Span)? = nil, linger_cap : Int32 = 4)
+      @principal = Chord.json_value(principal)
+      @principal_key = principal_key || Host.canonical_key
+      @self_key = @principal_key.call(@principal)
+      @on_error = Host.reporter(on_error)
+      @linger_types = linger || {} of String => Time::Span
+      @linger_cap = linger_cap
+      upstream.try { |link| connect(link.link, principal: link.principal, options: link.options) }
+    end
+
+    def previous_code_version : Int32?
+      nil
+    end
+
+    def serve(contract : Contract, *, lifetime : Lifetime = Lifetime::Referenced, linger : Time::Span? = nil,
+              accepts : Accepts? = nil, &factory : JSON::Any, JSON::Any, ObjectScope -> Implementation) : Nil
+      service = Service.new(contract, factory, lifetime, linger, accepts, "")
+      serve_into(service)
+      start_host_object(service) if service.host_lifetime?
+    end
+
+    def install(facet : Facet, await_host_objects : Bool = true) : Nil
+      refs = install_facet(facet)
+      Host.wait_ready(refs) if await_host_objects
+    end
+
+    def load(facets : Enumerable(Facet), await_host_objects : Bool = true) : Nil
+      refs = [] of Ref
+      facets.each { |facet| refs.concat(install_facet(facet)) }
+      Host.wait_ready(refs) if await_host_objects
+    end
+
+    def ready : Nil
+      Host.wait_ready(@host_objects.values)
+    end
+
+    def get(type : Contract, input = nil, principal = nil, signal : AbortSignal? = nil, state : Bool = true) : Ref
+      ref = acquire(type, input, principal.nil? ? nil : Chord.json_value(principal), RefOwner::External, state: state)
+      Chord.await_ready(ref, signal ? [signal] : [] of AbortSignal, @ready_timeout)
+      ref
+    end
+
+    def hold(type : Contract, input = nil, principal = nil, state : Bool = true) : Ref
+      acquire(type, input, principal.nil? ? nil : Chord.json_value(principal), RefOwner::External, state: state)
+    end
+
+    def root(principal = nil, signal : AbortSignal? = nil, code_version : Int32? = nil, &)
+      @root_seq += 1
+      root_id = "#{@name}##{@incarnation}:#{@root_seq}"
+      @local << root_id
+      join_root(root_id, code_version || @code_version, principal.nil? ? nil : Chord.json_value(principal), signal) do |ctx|
+        yield ctx
+      end
+    end
+
+    def registry(registry : Registry(V)) : RegistryView(V) forall V
+      RegistryView(V).new(self, registry)
+    end
+
+    def invalidate_principal(&match : JSON::Any -> Bool) : Nil
+      invalidate(match, nil)
+    end
+
+    def invalidate_principal(pattern) : Nil
+      fields = Chord.json_value(pattern)
+      invalidate(Host.pattern_matcher(fields), fields)
+    end
+
+    def accept(link : Link, *, principal, kind : PeerKind = PeerKind::Client, name : String? = nil, restamp = nil,
+               max_calls : Int32? = nil, options : LinkOptions? = nil, **link_options) : Nil
+      raise ArgumentError.new("accepting a host link needs its name") if kind.host? && name.nil?
+      origin = kind.client? ? "#{@incarnation}:#{@origin_seq += 1}" : nil
+      add_connection(Connection.new(self, link, Role::Downstream, Chord.json_value(principal),
+        Peer.new(kind, kind.host? ? name : nil), options || LinkOptions.new(**link_options), origin,
+        Host.restamper(restamp), max_calls))
+    end
+
+    def connect(link : Link, *, principal, options : LinkOptions? = nil, **link_options) : Nil
+      @upstream.try { |previous| previous.link.close("replaced") if previous.open? }
+      connection = add_connection(Connection.new(self, link, Role::Upstream, Chord.json_value(principal),
+        Peer.new(PeerKind::Host, nil), options || LinkOptions.new(**link_options)))
+      @upstream = connection
+      @bindings.values.each do |binding|
+        connection.hold(binding, binding.applied?) if binding.hold.nil? && !binding.ended?
+      end
+    end
+
+    def route(prefix : String, route : Route) : Nil
+      @routes[prefix] = route
+    end
+
+    def close : Nil
+      @lingering.values.each(&.close)
+      @host_objects.clear
+      @facet_runs.keys.each { |name| facet_run_changed(name, nil) }
+      begin
+        Host.dispose_holders_first(@objects.values, ChordError.new(ErrorCode::Gone, "host #{@name} closed"),
+          "host close: disposal failed")
+      ensure
+        @connections.to_a.each(&.link.close("host closed"))
+      end
+    end
+
+    def report(error : Exception) : Nil
+      @on_error.call(error)
+    end
+
+    protected def code_version?(code_version : Int32) : Bool
+      code_version == @code_version
+    end
+
+    protected def service(type_name : String) : Service?
+      @services[type_name]?
+    end
+
+    protected def serve_into(service : Service) : Nil
+      contract = service.contract
+      raise ArgumentError.new("#{contract.name} is already served") if @services.has_key?(contract.name)
+      placement = contract.description.host
+      if placement && !placement.placed_on?(@name)
+        raise ArgumentError.new("#{contract.name} is declared for #{placement.text}, but #{@name} serves it")
+      end
+      @services[contract.name] = service
+    end
+
+    protected def join_root(root_id : String, code_version : Int32, principal : JSON::Any? = nil,
+                            signal : AbortSignal? = nil, from : Connection? = nil, &)
+      unless code_version?(code_version)
+        @local.delete(root_id)
+        raise ChordError.new(ErrorCode::Superseded, "code version #{code_version} is not retained by #{@name}")
+      end
+      if from && !@local.includes?(root_id)
+        (@foreign[root_id] ||= ::Set(Connection).new) << from
+      end
+      @roots[root_id] = (@roots[root_id]? || 0) + 1
+      ctx = Ctx.new(self, signal ? [signal] : [] of AbortSignal, root_id, code_version, principal || @principal)
+      begin
+        yield ctx
+      ensure
+        ctx.close
+        count = (@roots[root_id]? || 1) - 1
+        if count > 0
+          @roots[root_id] = count
+        else
+          @roots.delete(root_id)
+          end_root(root_id) unless @foreign.has_key?(root_id)
+        end
+      end
+    end
+
+    protected def root_sent(root_id : String, connection : Connection) : Nil
+      (@root_links[root_id] ||= ::Set(Connection).new) << connection
+    end
+
+    protected def foreign_root_ended(root_id : String, from : Connection) : Nil
+      links = @foreign[root_id]?
+      return unless links && links.delete(from) && links.empty?
+      if @roots.has_key?(root_id)
+        @foreign.delete(root_id)
+      else
+        end_root(root_id)
+      end
+    end
+
+    protected def acquire(type : Contract, input, principal : JSON::Any?, owner : RefOwner, from : ObjectImpl? = nil,
+                          state : Bool = true) : Ref
+      raw = Chord.json_input(input)
+      if elsewhere = elsewhere(type, raw)
+        return acquire_remote(type, elsewhere[0], elsewhere[1], principal, owner, state)
+      end
+      service = @services[type.name]? || raise unknown_type(type.name)
+      Chord.bind(service.contract, service.accepts, type)
+      address, normalized, chosen = locate(service, raw, principal || @principal)
+      placement = service.contract.description.host
+      if placement && (at = placement.resolve(type.name, normalized)) != @name
+        raise Chord.invalid("placement", "#{type.name} with this input lives on #{at}, not #{@name}")
+      end
+      object = @objects[address]?
+      if from && object && (object.same?(from) || Host.reaches?(object, from))
+        raise Chord.invalid("cycle", "#{from.address} -> #{address} would create a ref cycle")
+      end
+      object ||= create_object(service, type, address, normalized, chosen)
+      ref = LocalRef.new(object, type, owner)
+      object.add_ref(ref)
+      ref
+    end
+
+    protected def address_of(type : Contract, input, principal : JSON::Any) : String
+      raw = Chord.json_input(input)
+      if elsewhere = elsewhere(type, raw)
+        return remote_key(type, elsewhere[1], principal)
+      end
+      service = @services[type.name]? || raise unknown_type(type.name)
+      locate(service, raw, principal)[0]
+    end
+
+    protected def forget(object : ObjectImpl) : Nil
+      @objects.delete(object.address) if @objects[object.address]?.try(&.same?(object))
+      @dying[object.address] = object if object.status.disposing?
+    end
+
+    protected def disposed(object : ObjectImpl) : Nil
+      @dying.delete(object.address) if @dying[object.address]?.try(&.same?(object))
+    end
+
+    protected def registry_table(registry : AnyRegistry, ctx : Ctx?) : RegistryTable
+      if ctx && !code_version?(ctx.code_version)
+        raise ChordError.new(ErrorCode::Superseded, "code version #{ctx.code_version} is retired")
+      end
+      @tables[registry.name]? || EMPTY_TABLE
+    end
+
+    protected def subscribe_registry(name : String, listener : TableListener) : Proc(Nil)
+      listeners = @subscribers[name] ||= Listeners(TableListener).new
+      id = listeners.add(listener)
+      listener.call(@tables[name]? || EMPTY_TABLE, @code_version)
+      listeners.remover(id)
+    end
+
+    protected def check_registrations(object : ObjectImpl, decls : Decls) : Nil
+      return if decls.registrations.empty?
+      entries = live_decls.reject { |(other, _)| other.same?(object) }
+      entries << {object, decls}
+      build_tables(entries)
+    end
+
+    protected def registries_changed(including : ObjectImpl? = nil) : Nil
+      entries = live_decls.reject { |(object, _)| object.same?(including) }
+      entries << {including, including.decls} if including
+      install_tables(build_tables(entries))
+    end
+
+    protected def peer_hello(connection : Connection, code_version : Int32) : Nil
+      if code_version > @code_version
+        report(ChordError.new(ErrorCode::Invalid, "#{connection.name} runs code version #{code_version}, ahead of #{@code_version}"))
+        connection.link.close("code version ahead of parent")
+        return
+      end
+      if code_version == @code_version
+        connection.mark_synced(code_version)
+        return
+      end
+      report(ChordError.new(ErrorCode::Unavailable,
+        "#{connection.name} runs code version #{code_version}, behind #{@code_version}; reconciling it needs reload"))
+      connection.link.close("code version behind parent")
+    end
+
+    protected def allow_retire(code_version : Int32) : Nil
+      @retire_allowed = Math.max(@retire_allowed, code_version)
+    end
+
+    protected def on_reload_frame(connection : Connection, frame : Frame) : Nil
+      return unless frame.t == "prepare"
+      error = ChordError.new(ErrorCode::Unavailable, "#{@name} cannot reload", reason: "reload_unsupported")
+      connection.send(Frame.build("vote", reload: frame.int("reload"), error: Wire.to_error(error)))
+    end
+
+    protected def connection_closed(connection : Connection) : Nil
+      @connections.delete(connection)
+      @foreign.to_a.each { |(root_id, links)| foreign_root_ended(root_id, connection) if links.includes?(connection) }
+      @root_links.each_value(&.delete(connection))
+      @upstream = nil if @upstream.same?(connection)
+    end
+
+    protected def binding_idle(binding : RemoteBinding) : Nil
+      span = @linger_types[binding.contract.name]?
+      if span.nil? || span <= Time::Span.zero || binding.ended? || !binding.applied? || @linger_cap <= 0
+        binding.close
+        return
+      end
+      token = binding.linger_token += 1
+      spawn { linger_then_close(binding, span, token) }
+      @lingering[binding.key] = binding
+      @lingering.values.each do |oldest|
+        break if @lingering.size <= @linger_cap
+        oldest.close
+      end
+    end
+
+    protected def forget_binding(binding : RemoteBinding) : Nil
+      @bindings.delete(binding.key) if @bindings[binding.key]?.same?(binding)
+      @lingering.delete(binding.key) if @lingering[binding.key]?.same?(binding)
+    end
+
+    protected def relay(relay : RelayRef) : Nil
+      frame = relay.frame
+      at = frame.string("at")
+      token = Chord.contract_from_description(frame["token"])
+      placement = token.description.host
+      unless placement && placement.resolve(token.name, frame["input"]) == at
+        raise Chord.invalid("placement", "#{token.name} with this input does not live on #{at}")
+      end
+      route = route_for(at)
+      unless route
+        raise child_named(at) ? ChordError.new(ErrorCode::Forbidden, "no route authorizes #{at}") : ChordError.new(ErrorCode::Unavailable, "no route to #{at}")
+      end
+      down = resolve_route(route, at, relay.principal, relay)
+      return unless relay.current?
+      relay.open(down)
+    end
+
+    private def end_root(root_id : String) : Nil
+      @local.delete(root_id)
+      @foreign.delete(root_id)
+      @root_links.delete(root_id).try &.each(&.send(Frame.build("root_end", rootId: root_id)))
+    end
+
+    private def add_connection(connection : Connection) : Connection
+      @connections << connection if connection.open?
+      connection
+    end
+
+    private def install_facet(facet : Facet) : Array(Ref)
+      raise ArgumentError.new("facet #{facet.name} is already installed") if @facets.has_key?(facet.name)
+      added = [] of Service
+      run = AbortController.new
+      begin
+        facet.setup.call(FacetApi.new(self, facet.name, run.signal, added))
+      rescue error
+        run.abort(error)
+        raise error
+      end
+      @facets[facet.name] = facet
+      facet_run_changed(facet.name, run)
+      added.select(&.host_lifetime?).map { |service| start_host_object(service) }
+    end
+
+    private def facet_run_changed(name : String, run : AbortController?) : Nil
+      replaced = @facet_runs[name]?
+      run ? (@facet_runs[name] = run) : @facet_runs.delete(name)
+      replaced.abort(ChordError.new(ErrorCode::Gone, "facet #{name} was replaced or removed")) if replaced && !replaced.same?(run)
+    end
+
+    private def start_host_object(service : Service) : Ref
+      ref = acquire(service.contract, nil, nil, RefOwner::Host)
+      @host_objects[service.contract.name] = ref
+      ready = ref.ready
+      ready.on_settle { ready.error.try { |error| report(error) }; nil }
+      ref
+    end
+
+    private def create_object(service : Service, type : Contract, address : String, normalized : JSON::Any,
+                              principal : JSON::Any) : ObjectImpl
+      dying = @dying[address]?
+      @dying.delete(address) if dying && dying.status.disposed?
+      object = ObjectImpl.new(self, address, type.name, normalized, principal, service.host_lifetime?)
+      @objects[address] = object
+      object.start(dying && dying.status.disposing? ? dying.dispose(false) : nil)
+      object
+    end
+
+    private def elsewhere(type : Contract, input : JSON::Any?) : Tuple(String, JSON::Any)?
+      placement = type.description.host
+      return unless type.remote? && placement
+      normalized = Schema.normalize(type.input, input, "#{type.name} input").not_nil!
+      at = placement.resolve(type.name, normalized)
+      at == @name ? nil : {at, normalized}
+    end
+
+    private def acquire_remote(type : Contract, at : String, input : JSON::Any, principal : JSON::Any?, owner : RefOwner,
+                               state : Bool) : Ref
+      forwarded = principal.nil? || own_principal?(principal) ? nil : principal
+      key = remote_key(type, input, forwarded || @principal)
+      binding = @bindings[key]?
+      fresh = binding.nil? || binding.ended?
+      if binding.nil? || binding.ended?
+        binding = RemoteBinding.new(self, key, type, at, input, forwarded)
+        @bindings[key] = binding
+      end
+      ref = RemoteRef.new(binding, owner, state)
+      @lingering.delete(key)
+      binding.add_view(ref)
+      hold(binding) if fresh
+      ref
+    end
+
+    private def hold(binding : RemoteBinding) : Nil
+      if upstream = @upstream
+        upstream.hold(binding, false)
+      elsif direct = child_named(binding.at)
+        spawn { hold_when_synced(binding) { direct.when_synced; direct } }
+      elsif route = route_for(binding.at)
+        spawn { hold_when_synced(binding) { resolve_route(route, binding.at, binding.principal || @principal, nil) } }
+      else
+        binding.gone(ChordError.new(ErrorCode::Unavailable, "no route to #{binding.at}"))
+      end
+    end
+
+    private def hold_when_synced(binding : RemoteBinding, & : -> Connection) : Nil
+      target = yield
+      target.hold(binding, false) if !binding.ended? && binding.hold.nil?
+    rescue error
+      binding.gone(error)
+    end
+
+    private def route_for(host_name : String) : Route?
+      best = nil.as(Tuple(String, Route)?)
+      @routes.each do |prefix, route|
+        best = {prefix, route} if host_name.starts_with?(prefix) && (best.nil? || prefix.size > best[0].size)
+      end
+      best.try(&.[1])
+    end
+
+    private def child_named(name : String) : Connection?
+      @connections.find { |connection| connection.open? && connection.role.downstream? && connection.peer.kind.host? && connection.peer.name == name }
+    end
+
+    private def resolve_route(route : Route, host_name : String, principal : JSON::Any, relay : RelayRef?) : Connection
+      refuse = ChordError.new(ErrorCode::Forbidden, "#{host_name} refused for this principal")
+      revoked = ChordError.new(ErrorCode::Gone, "principal invalidated while resolving")
+      raise refuse unless route.authorize.call(principal, host_name)
+      raise revoked if relay && !relay.current?
+      link = route.resolve.call(host_name)
+      raise revoked if relay && !relay.current?
+      raise refuse unless route.authorize.call(principal, host_name)
+      raise revoked if relay && !relay.current?
+      connection = @connections.find(&.link.same?(link)) ||
+                   add_connection(Connection.new(self, link, Role::Downstream, route.principal.call(host_name),
+                     Peer.new(PeerKind::Host, host_name), LinkOptions.new))
+      connection.when_synced
+      raise revoked if relay && !relay.current?
+      connection
+    end
+
+    private def locate(service : Service, input : JSON::Any?, principal : JSON::Any) : Tuple(String, JSON::Any, JSON::Any)
+      contract = service.contract
+      normalized = Schema.normalize(contract.input, input, "#{contract.name} input").not_nil!
+      identity = Schema.canonical_identity(contract.input, normalized)
+      if service.host_lifetime?
+        empty = Schema.normalize(contract.input, nil, "#{contract.name} input")
+        unless identity == Schema.canonical_identity(contract.input, empty)
+          raise Chord.invalid("input", %(#{contract.name} has lifetime "host": its one object has the empty input))
+        end
+        principal = @principal
+      end
+      {"#{contract.name}\u0000#{identity}\u0000#{principal_part(principal)}", normalized, principal}
+    end
+
+    private def remote_key(type : Contract, normalized : JSON::Any, principal : JSON::Any) : String
+      identity = Schema.canonical_identity(type.input, normalized)
+      "@#{type.name}\u0000#{identity}\u0000#{principal_part(principal)}\u0000#{type.fingerprint}"
+    end
+
+    private def own_principal?(principal : JSON::Any) : Bool
+      principal == @principal || @principal_key.call(principal) == @self_key
+    end
+
+    private def principal_part(principal : JSON::Any) : String
+      own_principal?(principal) ? "host" : "p:#{@principal_key.call(principal)}"
+    end
+
+    private def unknown_type(type_name : String) : ChordError
+      ChordError.new(ErrorCode::Unavailable, "#{type_name} is not served by #{@name}", reason: "unknown_type")
+    end
+
+    private def live_decls : Array(Tuple(ObjectImpl, Decls))
+      @objects.values.select(&.status.live?).map { |object| {object, object.decls} }
+    end
+
+    private def build_tables(entries : Array(Tuple(ObjectImpl, Decls))) : Hash(String, RegistryTable)
+      by_registry = {} of String => Hash(String, Tuple(RegistryEntry, ObjectImpl))
+      entries.each do |(object, decls)|
+        decls.registrations.each_value do |registration|
+          registry = registration.registry
+          table = by_registry[registry.name] ||= {} of String => Tuple(RegistryEntry, ObjectImpl)
+          existing = table[registration.key]?
+          if existing && !existing[1].same?(object) && registry.conflict.error?
+            raise Chord.invalid("registry_conflict",
+              "#{registry.name}: #{registration.key} registered by #{existing[1].address} and #{object.address}")
+          end
+          table[registration.key] = {registration.entry, object}
+          order = @order[registry.name] ||= {} of String => Int32
+          order[registration.key] = order.size unless order.has_key?(registration.key)
+        end
+      end
+      tables = {} of String => RegistryTable
+      by_registry.each do |name, table|
+        order = @order[name]
+        sorted = RegistryTable.new
+        table.to_a.sort_by! { |(key, _)| order[key] }.each { |(key, value)| sorted[key] = value[0] }
+        tables[name] = sorted
+      end
+      tables
+    end
+
+    private def install_tables(tables : Hash(String, RegistryTable)) : Nil
+      before = @tables
+      @tables = tables
+      @subscribers.each do |name, listeners|
+        following = tables[name]? || EMPTY_TABLE
+        next if Host.same_table?(before[name]? || EMPTY_TABLE, following)
+        current = listeners.snapshot
+        code_version = @code_version
+        Publish.enqueue { notify_table(current, following, code_version) }
+      end
+    end
+
+    private def notify_table(listeners, table : RegistryTable, code_version : Int32) : Nil
+      listeners.each do |(_, listener)|
+        listener.call(table, code_version)
+      rescue error
+        report(error)
+      end
+    end
+
+    private def invalidate(matches : Proc(JSON::Any, Bool), pattern : JSON::Any?) : Nil
+      @connections.to_a.each do |connection|
+        next unless connection.role.downstream? && matches.call(connection.principal)
+        connection.revoke(connection.restamp.try &.call(connection.principal))
+      end
+      if pattern
+        @connections.each do |connection|
+          next unless connection.role.downstream? && connection.peer.kind.host?
+          connection.send(Frame.build("invalidate", pattern: pattern))
+        end
+      end
+      reason = ChordError.new(ErrorCode::Gone, "principal invalidated")
+      matching = @objects.values.select { |object| !own_principal?(object.principal) && matches.call(object.principal) }
+      Host.dispose_holders_first(matching, reason, "invalidatePrincipal: disposal failed")
+    end
+
+    private def linger_then_close(binding : RemoteBinding, span : Time::Span, token : Int32) : Nil
+      sleep span
+      binding.close if binding.linger_token == token && binding.views.empty? && !binding.ended?
+    end
+
+    protected def self.wait_ready(refs : Enumerable(Ref)) : Nil
+      Chord.await_all(refs.map(&.ready))
+    end
+
+    protected def self.canonical_key : Proc(JSON::Any, String)
+      ->(principal : JSON::Any) { Schema.canonical_json(principal) }
+    end
+
+    protected def self.reporter(_on_error : Nil) : Reporter
+      ->(error : Exception) { STDERR.puts "chord: #{error.inspect_with_backtrace}"; nil }
+    end
+
+    protected def self.reporter(on_error : Proc(Exception, U)) : Reporter forall U
+      ->(error : Exception) { on_error.call(error); nil }
+    end
+
+    protected def self.restamper(_restamp : Nil) : Proc(JSON::Any, JSON::Any?)?
+      nil
+    end
+
+    protected def self.restamper(restamp : Proc(JSON::Any, U)) : Proc(JSON::Any, JSON::Any?)? forall U
+      ->(principal : JSON::Any) : JSON::Any? { Host.optional_json(restamp.call(principal)) }
+    end
+
+    protected def self.optional_json(_value : Nil) : JSON::Any?
+      nil
+    end
+
+    protected def self.optional_json(value) : JSON::Any?
+      Chord.json_value(value)
+    end
+
+    protected def self.pattern_matcher(pattern : JSON::Any) : Proc(JSON::Any, Bool)
+      ->(principal : JSON::Any) { matches_pattern?(pattern, principal) }
+    end
+
+    protected def self.matches_pattern?(pattern : JSON::Any, principal : JSON::Any) : Bool
+      fields = principal.as_h?
+      return false unless fields
+      pattern.as_h.all? { |key, value| Schema.deep_equal?(fields[key]?, value) }
+    end
+
+    protected def self.same_table?(left : RegistryTable, right : RegistryTable) : Bool
+      return false unless left.size == right.size
+      left.zip(right).all? { |(a_key, a_entry), (b_key, b_entry)| a_key == b_key && a_entry.same?(b_entry) }
+    end
+
+    protected def self.reaches?(from : ObjectImpl, to : ObjectImpl) : Bool
+      seen = ::Set(ObjectImpl).new
+      stack = [from]
+      while object = stack.pop?
+        return true if object.same?(to)
+        next if seen.includes?(object)
+        seen << object
+        object.all_decls.each { |decls| decls.refs.each_value { |ref| ref.object.try { |held| stack << held } } }
+      end
+      false
+    end
+
+    protected def self.dispose_holders_first(objects : Array(ObjectImpl), reason : Exception, message : String) : Nil
+      remaining = objects.to_set
+      held = objects.to_h { |object| {object, held_by(object)} }
+      errors = [] of Exception
+      until remaining.empty?
+        targets = ::Set(ObjectImpl).new
+        remaining.each { |object| targets.concat(held[object]) }
+        wave = remaining.reject { |object| targets.includes?(object) }
+        wave = remaining.to_a if wave.empty?
+        wave.each { |object| remaining.delete(object) }
+        disposals = wave.map(&.dispose(true, reason))
+        disposals.each(&.await_settled)
+        disposals.each { |disposal| disposal.error.try { |error| errors << error } }
+      end
+      raise errors[0] if errors.size == 1
+      raise AggregateError.new(errors, message) if errors.size > 1
+    end
+
+    private def self.held_by(object : ObjectImpl) : ::Set(ObjectImpl)
+      result = ::Set(ObjectImpl).new
+      object.all_decls.each { |decls| decls.refs.each_value { |ref| ref.object.try { |held| result << held } } }
+      result
+    end
+  end
+
+  macro create_host(**options)
+    ::LLM::Chord::Host.new({{options.double_splat}})
+  end
+end
