@@ -466,8 +466,10 @@ module LLM::Chord
         raise Chord.invalid("cycle", "#{from.address} -> #{address} would create a ref cycle")
       end
       if object.nil?
-        if @gating && @gating.includes?(type.name)
-          raise ChordError.new(ErrorCode::UpgradeConflict, "#{type.name} is being upgraded; retry", reason: "gate")
+        if gating = @gating
+          if gating.includes?(type.name)
+            raise ChordError.new(ErrorCode::UpgradeConflict, "#{type.name} is being upgraded; retry", reason: "gate")
+          end
         end
         object = create_object(service, type, address, normalized, chosen)
       end
