@@ -462,6 +462,8 @@ module LLM::Chord
     private def end_root(root_id : String) : Nil
       @local.delete(root_id)
       @foreign.delete(root_id)
+      (@touches[root_id]? || [] of ObjectImpl).to_a.each(&.root_ended(root_id))
+      @touches.delete(root_id)
       @root_links.delete(root_id).try &.each(&.send(Frame.build("root_end", rootId: root_id)))
     end
 
@@ -470,12 +472,16 @@ module LLM::Chord
       connection
     end
 
+    protected def facet_api(facet : String, signal : AbortSignal, added : Array(Service), services : Hash(String, Service)) : FacetApi
+      FacetApi.new(self, facet, signal, ->(service : Service) { serve_into(services, service); added << service; nil })
+    end
+
     private def install_facet(facet : Facet) : Array(Ref)
       raise ArgumentError.new("facet #{facet.name} is already installed") if @facets.has_key?(facet.name)
       added = [] of Service
       run = AbortController.new
       begin
-        facet.setup.call(FacetApi.new(self, facet.name, run.signal, added))
+        facet.setup.call(facet_api(facet.name, run.signal, added, @current.services))
       rescue error
         run.abort(error)
         raise error
@@ -485,13 +491,13 @@ module LLM::Chord
       added.select(&.host_lifetime?).map { |service| start_host_object(service) }
     end
 
-    private def facet_run_changed(name : String, run : AbortController?) : Nil
+    protected def facet_run_changed(name : String, run : AbortController?) : Nil
       replaced = @facet_runs[name]?
       run ? (@facet_runs[name] = run) : @facet_runs.delete(name)
       replaced.abort(ChordError.new(ErrorCode::Gone, "facet #{name} was replaced or removed")) if replaced && !replaced.same?(run)
     end
 
-    private def start_host_object(service : Service) : Ref
+    protected def start_host_object(service : Service) : Ref
       ref = acquire(service.contract, nil, nil, RefOwner::Host)
       @host_objects[service.contract.name] = ref
       ready = ref.ready
