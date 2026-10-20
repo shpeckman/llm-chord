@@ -18,14 +18,21 @@ module LLM::Chord
     def get(type : Contract, input = nil, principal = nil, state : Bool = true) : Ref
       host = @object.host
       chosen = principal.nil? ? host.principal : Chord.json_value(principal)
-      address = host.address_of(type, input, chosen)
+      candidate = !@previous.nil?
+      address = host.address_of(type, input, chosen, candidate)
       if declared = @run.decls.refs[address]?
         unless declared.contract.fingerprint == type.fingerprint
           raise Chord.invalid("duplicate", "#{@object.type_name}: #{type.name} held twice with different contracts")
         end
         return declared
       end
-      ref = host.acquire(type, input, chosen, RefOwner::Object, @object, state)
+      if existing = @previous.try(&.refs[address]?)
+        if existing.contract.fingerprint == type.fingerprint && !existing.status.gone? && !existing.status.released?
+          @run.decls.refs[address] = existing
+          return existing
+        end
+      end
+      ref = host.acquire(type, input, chosen, RefOwner::Object, @object, state, candidate)
       @run.decls.refs[address] = ref
       @run.created_refs << ref
       ref
