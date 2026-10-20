@@ -16,8 +16,13 @@ The port currently covers chord's foundation layer:
 - `LLM::Chord::Output` — `@earendil-works/chord/output`: bounded output
   streams and paced progress commits.
 - `LLM::Chord::ChordError` — chord's error codes and helpers.
+- `LLM::Chord.remote` / `.local` — contracts with placement, variants,
+  versions, fingerprints, coverage, and binding; `LLM::Chord::Schema` —
+  canonical JSON, `hash64`, input normalization and identity, and the `fits?`
+  compatibility rule. Schemas are built with the `typebox` shard, which emits
+  the same JSON Schema as TypeBox.
 
-Contracts, objects, hosts, links, reload, and SQLite are not ported yet; see
+Objects, hosts, links, reload, and SQLite are not ported yet; see
 [ROADMAP.md](ROADMAP.md). Values are Crystal's `JSON::Any`.
 
 ## Requirements
@@ -31,6 +36,9 @@ dependencies:
   llm-chord:
     github: shpeckman/llm-chord
 ```
+
+llm-chord depends on the `typebox` shard, referenced in its `shard.yml` as a
+sibling checkout (`path: ../typebox`).
 
 Then `shards install`, and in your code:
 
@@ -265,6 +273,87 @@ buffer.snapshot                 # => Bounded(text, dropped_bytes, dropped_lines)
 `ChordError`, wraps anything else as `unavailable`), and `.run_all` (runs every
 step, then raises the one error or an `AggregateError`).
 
+## Contracts
+
+A contract declares a type: its name, version, input schema, and members. A
+remote type also declares where its objects live. Schemas come from
+`TypeBox::Type`.
+
+```crystal
+T = TypeBox::Type
+C = LLM::Chord
+
+View = T.object({text: T.string})
+
+Chat = C.remote("t.chat",
+  version: 1,
+  input: T.object({session: T.string, conversation: T.number(default: 0)}),
+  host: C.host_family("session:", "session"),
+  variants: {
+    viewer:      C.variant(state: {view: View}),
+    participant: C.variant(
+      state: {view: View},
+      methods: {send: C.method(T.object({text: T.string}), T.object({id: T.number}))},
+    ),
+  })
+
+Index = C.local("t.index", version: 1, input: T.object, members: {
+  harness: C.opaque("harness@1"),
+  count:   T.integer,
+  bump:    C.method,
+})
+
+Chat.fingerprint                     # => 16 hex digits, identical to chord's
+Chat.description.json                # the description that travels in tokens
+```
+
+- `C.method(args = nil, result = nil)`: no `args` means the method takes no
+  arguments; no `result` means it returns nothing.
+- `C.opaque("name@version")`: a native in-process object, for local contracts
+  only.
+- Placement: `C.host_named("server")`, or `C.host_family(prefix, key)`, which
+  puts an object on `prefix` + the input's string field `key`.
+  `C.resolve_host`, `C.placed_on?`, and `C.placement_text` work on either.
+- Members named `variant`, `status`, `ready`, `shape`, `error`, `onShape`,
+  `onStatus`, `release`, `then`, or `contract` are rejected, as are opaque
+  members in remote contracts. Construction errors raise `ArgumentError`.
+- `RemoteDef` and `LocalDef` are records: `C.remote(name, Chat.definition.copy_with(version: 2))`
+  derives a new version.
+- The fingerprint is `hash64(canonical_json(description))`, so a contract
+  built here and the same contract built by chord share a fingerprint.
+
+### Compatibility
+
+`C.coverage(provider_description, consumer_description)` returns `nil` when the
+provider covers the consumer, or the reason it does not (`"input"`,
+`"participant.send arguments"`, `"host"`, ...). `C.bind(provider, accepts,
+consumer)` returns `nil` for a direct binding, the consumer version's adapter
+from `accepts` (a `Hash(Int32, A)` of any adapter type), or raises
+`contract_mismatch`:
+
+- equal fingerprints bind directly;
+- a different placement never binds;
+- the same version binds when the provider covers the consumer;
+- another version needs an adapter in `accepts`.
+
+`C.contract_from_description(json)` rebuilds a consumer token from a received
+description (raising `invalid/token` when malformed); `DESCRIPTION_SCHEMA`
+validates one. `C.takes_no_args?(contract, name)` tells how a method is called.
+
+### Schema helpers
+
+`LLM::Chord::Schema` ports chord's `schema.ts`:
+
+| Function | Behavior |
+| --- | --- |
+| `canonical_json(value)` | sorted-key JSON, numbers and strings as `JSON.stringify` writes them |
+| `hash64(text)` | two FNV-1a lanes over UTF-16 code units, 16 hex digits |
+| `deep_equal?(a, b)` | equality by canonical JSON |
+| `normalize(schema, value, what)` | clone, apply defaults, strip unknown fields, validate; raises `invalid/input` |
+| `canonical_identity(schema, value)` | canonical JSON with fields equal to their default omitted |
+| `assert_valid(reason, what, schema, value)` | raises `invalid/<reason>` with the first three errors |
+| `fits?(sub, sup)` | conservative structural subtyping used by coverage |
+
 ## Replicated state
 
 ```crystal
@@ -331,6 +420,16 @@ and reports to `on_error` (an `AggregateError` when disposal also fails).
   `.utf8_byte_length`, `PROGRESS_BYTES_PER_SECOND`
 - `LLM::Chord::ChordError`, `ErrorCode`, `.chord_error?`, `.forbidden`, `.invalid`,
   `.as_chord_error`, `.run_all`
+- `LLM::Chord.remote`, `.local`, `.variant`, `.method`, `.opaque`, `.host_named`,
+  `.host_family`, `.resolve_host`, `.placed_on?`, `.placement_text`, `.coverage`,
+  `.bind`, `.contract_from_description`, `.takes_no_args?`
+- `Contract` (`RemoteContract`, `LocalContract`; `#name`, `#version`, `#input`,
+  `#description`, `#fingerprint`, `#scope`, `#definition`), `RemoteDef`, `LocalDef`,
+  `VariantDef`, `MethodSpec`, `OpaqueSpec`, `Member`, `Placement` (`HostNamed`,
+  `HostFamily`), `Description`, `MemberDescription`, `LOCAL_VARIANT`,
+  `RESERVED_MEMBERS`, `DESCRIPTION_SCHEMA`, `PLACEMENT_SCHEMA`
+- `LLM::Chord::Schema.canonical_json`, `.hash64`, `.deep_equal?`, `.assert_valid`,
+  `.normalize`, `.canonical_identity`, `.fits?`
 - `LLM::Chord.replicated_state(initial) : MutableReplicatedState` (`#value`, `#subscribe`, `#change`, `#replace`)
 - `LLM::Chord.replicated_state(source, on_error = nil) : AttachedReplicatedState` (`#value`, `#subscribe`, `#dispose`)
 - `Delivery`, `DeliveryKind`, `StateListener`, `ErrorReporter`, `AggregateError`,
@@ -354,6 +453,11 @@ and reports to `on_error` (an `AggregateError` when disposal also fails).
   `setAttributes`, `status=` for `setStatus`, and `recorded_spans` /
   `recorded_metrics` for `getSpans` / `getMetrics`. pi-telemetry's typed schema
   helpers are TypeScript type-level only and are not ported.
+- Contracts carry no static types: chord's `Ref`, `ImplementationOf`, and
+  `InputOf` are TypeScript type-level only. Contract construction errors are
+  `ArgumentError` where chord throws `TypeError`, and `def` is `definition`.
+- Schema behavior inherits the `typebox` shard's documented differences from
+  TypeBox (see its README).
 
 ## Development
 
