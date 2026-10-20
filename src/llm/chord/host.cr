@@ -619,11 +619,11 @@ module LLM::Chord
       ChordError.new(ErrorCode::Unavailable, "#{type_name} is not served by #{@name}", reason: "unknown_type")
     end
 
-    private def live_decls : Array(Tuple(ObjectImpl, Decls))
-      @objects.values.select(&.status.live?).map { |object| {object, object.decls} }
+    protected def live_decls(candidates : Bool = false) : Array(Tuple(ObjectImpl, Decls))
+      @objects.values.select(&.status.live?).reject { |object| !candidates && object.deferred_runtime }.map { |object| {object, object.decls} }
     end
 
-    private def build_tables(entries : Array(Tuple(ObjectImpl, Decls))) : Hash(String, RegistryTable)
+    protected def build_tables(entries : Array(Tuple(ObjectImpl, Decls))) : Hash(String, RegistryTable)
       by_registry = {} of String => Hash(String, Tuple(RegistryEntry, ObjectImpl))
       entries.each do |(object, decls)|
         decls.registrations.each_value do |registration|
@@ -649,15 +649,16 @@ module LLM::Chord
       tables
     end
 
-    private def install_tables(tables : Hash(String, RegistryTable)) : Nil
-      before = @tables
-      @tables = tables
+    protected def install_tables(code_version : CodeVersionState, tables : Hash(String, RegistryTable), all : Bool = false) : Nil
+      before = code_version.tables
+      code_version.tables = tables
+      return unless code_version.id == @current.id
       @subscribers.each do |name, listeners|
         following = tables[name]? || EMPTY_TABLE
-        next if Host.same_table?(before[name]? || EMPTY_TABLE, following)
+        next if !all && Host.same_table?(before[name]? || EMPTY_TABLE, following)
         current = listeners.snapshot
-        code_version = @code_version
-        Publish.enqueue { notify_table(current, following, code_version) }
+        version = code_version.id
+        Publish.enqueue { notify_table(current, following, version) }
       end
     end
 
