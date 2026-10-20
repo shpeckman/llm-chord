@@ -16,17 +16,18 @@ module LLM::Chord::Delta
     root
   end
 
-  private def self.apply_ops(root : JSON::Any, ops : Array(Op)) : JSON::Any
+  private def self.apply_ops(root : JSON::Any, ops : Array(Op), detach : Bool = true) : JSON::Any
     current = root
     ops.each do |op|
       case op
       when Op::Replace
-        current = Json.deep_copy(op.value)
+        current = detach ? Json.deep_copy(op.value) : op.value
       when Op::Splice
         array = resolve_container(current, op.path)
         raw = array.raw
         raise PathError.new(op.path) unless raw.is_a?(Array)
-        raw[op.index, op.remove] = op.items.map { |item| Json.deep_copy(item) }
+        items = detach ? op.items.map { |item| Json.deep_copy(item) } : op.items
+        raw[op.index, op.remove] = items
       when Op::Move
         array = resolve_container(current, op.path)
         raw = array.raw
@@ -35,19 +36,19 @@ module LLM::Chord::Delta
         previous = raw.dup
         op.permutation.each_with_index { |from, index| raw[index] = previous[from] }
       when Op::Set
-        apply_leaf(current, op)
+        apply_leaf(current, op, detach)
       when Op::Delete
-        apply_leaf(current, op)
+        apply_leaf(current, op, detach)
       when Op::Append
-        apply_leaf(current, op)
+        apply_leaf(current, op, detach)
       when Op::Truncate
-        apply_leaf(current, op)
+        apply_leaf(current, op, detach)
       end
     end
     current
   end
 
-  private def self.apply_leaf(root : JSON::Any, op : Op) : Nil
+  private def self.apply_leaf(root : JSON::Any, op : Op, detach : Bool = true) : Nil
     path = op_path(op)
     raise ArgumentError.new("op path is empty") if path.empty?
     assert_safe_path(path)
@@ -55,7 +56,7 @@ module LLM::Chord::Delta
     key = path[-1]
     case op
     when Op::Set
-      write!(parent, key, Json.deep_copy(op.value))
+      write!(parent, key, detach ? Json.deep_copy(op.value) : op.value)
     when Op::Delete
       delete!(parent, key)
     when Op::Append
