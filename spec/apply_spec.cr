@@ -1,193 +1,181 @@
 # spec/apply_spec.cr
 require "./spec_helper"
-include LLM::Chord::Delta
 
-describe LLM::Chord::Delta do
-  describe ".apply" do
-    it "sets an object property" do
-      base = JSON.parse(%({"a":0}))
-      apply(base, [Op::Set.new(path("a"), JSON::Any.new(1_i64))]).should eq JSON.parse(%({"a":1}))
-    end
-
-    it "sets an array element and appends at the end" do
-      base = JSON.parse(%([0,1]))
-      apply(base, [Op::Set.new(path(1), JSON::Any.new(9_i64))]).should eq JSON.parse(%([0,9]))
-      apply(base, [Op::Set.new(path(2), JSON::Any.new(2_i64))]).should eq JSON.parse(%([0,9,2]))
-    end
-
-    it "deletes an object property" do
-      base = JSON.parse(%({"a":1,"b":2}))
-      apply(base, [Op::Delete.new(path("b"))]).should eq JSON.parse(%({"a":1}))
-    end
-
-    it "deletes an array element" do
-      base = JSON.parse(%([0,1,2]))
-      apply(base, [Op::Delete.new(path(1))]).should eq JSON.parse(%([0,2]))
-    end
-
-    it "appends to a string" do
-      base = JSON.parse(%({"s":"hi"}))
-      apply(base, [Op::Append.new(path("s"), "!")]).should eq JSON.parse(%({"s":"hi!"}))
-    end
-
-    it "truncates a string from the front" do
-      base = JSON.parse(%({"s":"hello"}))
-      apply(base, [Op::Truncate.new(path("s"), 2)]).should eq JSON.parse(%({"s":"llo"}))
-    end
-
-    it "splices an array" do
-      base = JSON.parse(%({"arr":[0,1,2,3]}))
-      items = [JSON::Any.new("x"), JSON::Any.new("y")]
-      apply(base, [Op::Splice.new(path("arr"), 1, 2, items)]).should eq JSON.parse(%({"arr":[0,"x","y",3]}))
-    end
-
-    it "moves array elements" do
-      base = JSON.parse(%([0,1]))
-      apply(base, [Op::Move.new([] of Seg, [1, 0])]).should eq JSON.parse(%([1,0]))
-    end
-
-    it "replaces the root" do
-      base = JSON.parse(%({"a":0}))
-      apply(base, [Op::Replace.new(JSON.parse(%({"b":1})))]).should eq JSON.parse(%({"b":1}))
-    end
-
-    it "rejects reserved path segments" do
-      base = JSON.parse(%({}))
-      expect_raises(UnsafePathError) { apply(base, [Op::Set.new(path("__proto__"), JSON::Any.new(true))]) }
-    end
-
-    it "rejects an out-of-range array index" do
-      base = JSON.parse(%([0,1]))
-      expect_raises(UnsafePathError) { apply(base, [Op::Set.new(path(5), JSON::Any.new(1_i64))]) }
-    end
-
-    it "raises on an unresolvable path" do
-      base = JSON.parse(%({"a":1}))
-      expect_raises(PathError) { apply(base, [Op::Set.new(path("missing", "deep"), JSON::Any.new(1_i64))]) }
-    end
-
-    it "mutates the target in place" do
-      base = JSON.parse(%({"a":0}))
-      result = apply(base, [Op::Set.new(path("a"), JSON::Any.new(1_i64))])
-      result.should eq JSON.parse(%({"a":1}))
-      base.should eq JSON.parse(%({"a":1}))
-    end
-
-    it "truncates an entire string to empty" do
-      base = JSON.parse(%({"s":"ab"}))
-      apply(base, [Op::Truncate.new(path("s"), 2)]).should eq JSON.parse(%({"s":""}))
-    end
-
-    it "truncates past the end to empty" do
-      base = JSON.parse(%({"s":"ab"}))
-      apply(base, [Op::Truncate.new(path("s"), 5)]).should eq JSON.parse(%({"s":""}))
-    end
-
-    it "truncates by UTF-16 code units" do
-      base = JSON.parse(%({"s":"😀x"}))
-      apply(base, [Op::Truncate.new(path("s"), 2)]).should eq JSON.parse(%({"s":"x"}))
-    end
-
-    it "rejects a move with a mismatched permutation" do
-      base = JSON.parse(%([0,1,2]))
-      expect_raises(PathError) { apply(base, [Op::Move.new([] of Seg, [1, 0])]) }
-    end
-
-    it "rejects a move with a non-bijection permutation" do
-      base = JSON.parse(%([0,1]))
-      expect_raises(ArgumentError) { apply(base, [Op::Move.new([] of Seg, [1, 1])]) }
-    end
-
-    it "rejects a splice on a non-array" do
-      base = JSON.parse(%({"a":1}))
-      expect_raises(PathError) { apply(base, [Op::Splice.new(path("a"), 0, 0, [] of JSON::Any)]) }
-    end
-
-    it "rejects a move on a non-array" do
-      base = JSON.parse(%({"a":1}))
-      expect_raises(PathError) { apply(base, [Op::Move.new(path("a"), [0])]) }
-    end
+describe "LLM::Chord::Delta.apply" do
+  it "applies mutable and immutable operations" do
+    operations = ops(%([["a",["text"],"b"],["p",["values"],1,1,[3,4]],["s",["nested","value"],2]]))
+    base = j(%({"text":"a","values":[1,2],"nested":{"value":1},"stable":{"value":9}}))
+    immutable = Delta.apply_immutable(base, operations)
+    immutable.should eq j(%({"text":"ab","values":[1,3,4],"nested":{"value":2},"stable":{"value":9}}))
+    base.should eq j(%({"text":"a","values":[1,2],"nested":{"value":1},"stable":{"value":9}}))
+    same?(immutable["stable"], base["stable"]).should be_true
+    Delta.apply(Json.deep_copy(base), operations).should eq immutable
   end
 
-  describe ".apply_immutable" do
-    it "leaves the target unmodified" do
-      base = JSON.parse(%({"a":0}))
-      result = apply_immutable(base, [Op::Set.new(path("a"), JSON::Any.new(1_i64))])
-      result.should eq JSON.parse(%({"a":1}))
-      base.should eq JSON.parse(%({"a":0}))
-    end
-
-    it "keeps a nested target independent of the result" do
-      base = JSON.parse(%({"a":{"b":[1]}}))
-      result = apply_immutable(base, [Op::Set.new(path("a", "b", 0), JSON::Any.new(9_i64))])
-      result["a"]["b"].as_a << JSON::Any.new(2_i64)
-      base["a"]["b"].as_a.size.should eq 1
-      base["a"]["b"].as_a[0].raw.should eq 1_i64
-    end
-
-    it "does not alias a replacement payload" do
-      payload = JSON.parse(%({"n":0}))
-      result = apply_immutable(JSON.parse(%({"old":true})), [Op::Replace.new(payload)])
-      payload.as_h["n"] = JSON::Any.new(1_i64)
-      result["n"].as_i.should eq 0_i64
-    end
-
-    it "does not alias a set payload" do
-      payload = JSON.parse(%({"n":0}))
-      result = apply_immutable(JSON.parse(%({"a":0})), [Op::Set.new(path("a"), payload)])
-      payload.as_h["n"] = JSON::Any.new(1_i64)
-      result["a"]["n"].as_i.should eq 0_i64
-    end
-
-    it "does not alias a splice payload" do
-      items = [JSON.parse(%({"n":0}))]
-      result = apply_immutable(JSON.parse(%({"arr":[]})), [Op::Splice.new(path("arr"), 0, 0, items)])
-      items[0].as_h["n"] = JSON::Any.new(1_i64)
-      result["arr"].as_a[0]["n"].as_i.should eq 0_i64
-    end
+  it "supports root replacement, root splice, and permutations" do
+    base = ops(%([["r",[1,2,3]]]))
+    Delta.base?(base).should be_true
+    value = Delta.apply(JSON::Any.new(nil), base)
+    value = Delta.apply(value, ops(%([["p",[],1,1,[4]]])))
+    value = Delta.apply(value, ops(%([["m",[],[2,0,1]]])))
+    value.should eq j("[3,1,4]")
   end
 
-  describe ".apply_immutable_batches" do
-    it "applies several batches in order" do
-      base = JSON.parse(%({"a":0}))
-      b1 = [Op::Set.new(path("a"), JSON::Any.new(1_i64))]
-      b2 = [Op::Set.new(path("a"), JSON::Any.new(2_i64))]
-      apply_immutable_batches(base, [b1, b2]).should eq JSON.parse(%({"a":2}))
-    end
+  it "rejects unsafe and malformed paths" do
+    expect_raises(UnsafePathError) { Delta.apply(j("{}"), ops(%([["s",["constructor","prototype","x"],true]]))) }
+    expect_raises(UnsafePathError) { Delta.apply(j(%({"values":[1]})), ops(%([["s",["values",3],2]]))) }
+    expect_raises(PathError) { Delta.apply(j(%({"value":1})), ops(%([["a",["value"],"x"]]))) }
+    expect_raises(ArgumentError) { Op.from_tuple(j(%(["s","value",1]))) }
+    expect_raises(ArgumentError, /bijection/) { Op.from_tuple(j(%(["m",[],[0,0]]))) }
   end
 
-  describe ".apply_immutable_shared" do
-    it "produces the same value as apply_immutable" do
-      base = JSON.parse(%({"a":{"b":[1,2]},"c":"x"}))
-      ops = [
-        Op::Set.new(path("a", "b", 0), JSON::Any.new(9_i64)),
-        Op::Set.new(path("c"), JSON::Any.new("y")),
-      ]
-      LLM::Chord::Delta.apply_immutable_shared(base, ops).should eq apply_immutable(base, ops)
-    end
-
-    it "shares untouched subtrees with the target" do
-      base = JSON.parse(%({"a":{"x":1},"b":{"y":2}}))
-      result = LLM::Chord::Delta.apply_immutable_shared(base, [Op::Set.new(path("a", "x"), JSON::Any.new(9_i64))])
-      result["a"]["x"].as_i.should eq 9_i64
-      result["b"].as_h.object_id.should eq base["b"].as_h.object_id
-      base["a"]["x"].as_i.should eq 1_i64
-    end
-
-    it "adopts op payloads" do
-      payload = JSON.parse(%({"n":0}))
-      result = LLM::Chord::Delta.apply_immutable_shared(JSON.parse(%({"a":0})), [Op::Set.new(path("a"), payload)])
-      payload.as_h["n"] = JSON::Any.new(1_i64)
-      result["a"]["n"].as_i.should eq 1_i64
-    end
+  it "adopts a mutable replacement payload rather than copying it" do
+    batch = ops(%([["r",{"value":0}]]))
+    first = Delta.apply(JSON::Any.new(nil), batch)
+    second = Delta.apply(JSON::Any.new(nil), batch)
+    first.as_h["value"] = JSON::Any.new(1_i64)
+    second["value"].should eq JSON::Any.new(1_i64)
   end
 
-  describe ".apply_immutable_batches_shared" do
-    it "matches apply_immutable_batches" do
-      base = JSON.parse(%({"a":0}))
-      b1 = [Op::Set.new(path("a"), JSON::Any.new(1_i64))]
-      b2 = [Op::Set.new(path("a"), JSON::Any.new(2_i64))]
-      LLM::Chord::Delta.apply_immutable_batches_shared(base, [b1, b2]).should eq apply_immutable_batches(base, [b1, b2])
+  it "allows reserved names inside values" do
+    result = Delta.apply(j("{}"), [Op::Set.new(path("value"), j(%({"__proto__":{"z":1}})))] of Op)
+    result["value"].as_h.has_key?("__proto__").should be_true
+  end
+
+  it "writes an existing index and appends exactly one past the end" do
+    Delta.apply(j(%({"values":[1,2,3]})), ops(%([["s",["values",1],9]]))).should eq j(%({"values":[1,9,3]}))
+    Delta.apply(j(%({"values":[1,2,3]})), ops(%([["s",["values",3],9]]))).should eq j(%({"values":[1,2,3,9]}))
+  end
+
+  it "rejects gaps, huge indices, and string-spelled indices" do
+    expect_raises(UnsafePathError) { Delta.apply(j(%({"values":[1,2,3]})), ops(%([["s",["values",5],9]]))) }
+    expect_raises(UnsafePathError) { Delta.apply(j(%({"values":[]})), ops(%([["s",["values",4294967290],1]]))) }
+    expect_raises(UnsafePathError) { Delta.apply(j(%({"values":[1]})), ops(%([["s",["values","0"],9]]))) }
+    expect_raises(UnsafePathError) { Delta.apply(j(%({"values":["a"]})), ops(%([["a",["values","0"],"b"]]))) }
+  end
+
+  it "allows explicit growth values and rejects deletion past the end" do
+    Delta.apply(j(%({"values":[1]})), ops(%([["p",["values"],1,0,[null,null,9]]]))).should eq j(%({"values":[1,null,null,9]}))
+    expect_raises(PathError) { Delta.apply(j(%({"values":[1]})), ops(%([["d",["values",1]]]))) }
+  end
+
+  it "applies large splice payloads" do
+    items = Array(JSON::Any).new(300_000) { JSON::Any.new(nil) }
+    result = Delta.apply(j(%({"values":[]})), [Op::Splice.new(path("values"), 0, 0, items)] of Op)
+    result["values"].as_a.size.should eq 300_000
+  end
+
+  it "rejects invalid append and truncation operations" do
+    expect_raises(PathError) { Delta.apply(j(%({"value":1})), ops(%([["a",["missing"],"x"]]))) }
+    expect_raises(PathError) { Delta.apply(j(%({"value":1})), ops(%([["a",["value"],"x"]]))) }
+    expect_raises(ArgumentError) { Op::Truncate.new(path("value"), -1) }
+  end
+
+  it "clamps splice removal and insertion past the end" do
+    Delta.apply(j(%({"values":[1,2]})), ops(%([["p",["values"],0,1e9,[]]]))).should eq j(%({"values":[]}))
+    Delta.apply(j(%({"values":[1,2]})), ops(%([["p",["values"],9,0,[3]]]))).should eq j(%({"values":[1,2,3]}))
+  end
+
+  it "truncates strings by UTF-16 code units" do
+    Delta.apply(j(%({"text":"😀ab"})), ops(%([["t",["text"],2]]))).should eq j(%({"text":"ab"}))
+  end
+
+  it "coerces numeric segments to keys on objects" do
+    Delta.apply(j(%({"items":{"0":"a"}})), ops(%([["a",["items",0],"b"]]))).should eq j(%({"items":{"0":"ab"}}))
+  end
+
+  it "rejects permutations that do not match the array length" do
+    expect_raises(PathError) { Delta.apply(j("[1,2,3]"), ops(%([["m",[],[1,0]]]))) }
+  end
+end
+
+describe "LLM::Chord::Delta.apply_immutable" do
+  it "does not mutate a replacement payload targeted by a later operation" do
+    replacement = j(%({"nested":{"value":1}}))
+    next_value = Delta.apply_immutable(JSON::Any.new(nil), [Op::Replace.new(replacement), Op::Set.new(path("nested", "value"), JSON::Any.new(2_i64))] of Op)
+    replacement["nested"]["value"].should eq JSON::Any.new(1_i64)
+    next_value["nested"]["value"].should eq JSON::Any.new(2_i64)
+  end
+
+  it "copies each touched container once while preserving input and payload ownership" do
+    base = j(%({"a":{"b":{"c":1,"d":2}},"untouched":{"x":1},"list":[{"v":1},{"v":2}]}))
+    snapshot = Json.deep_copy(base)
+    payload = j(%({"fresh":true}))
+    operations = [
+      Op::Set.new(path("a", "b", "c"), JSON::Any.new(3_i64)),
+      Op::Set.new(path("a", "b", "d"), JSON::Any.new(4_i64)),
+      Op::Set.new(path("a", "payload"), payload),
+      Op::Set.new(path("list", 1, "v"), JSON::Any.new(9_i64)),
+    ] of Op
+    result = Delta.apply_immutable(base, operations)
+    base.should eq snapshot
+    result.should eq j(%({"a":{"b":{"c":3,"d":4},"payload":{"fresh":true}},"untouched":{"x":1},"list":[{"v":1},{"v":9}]}))
+    same?(result["untouched"], base["untouched"]).should be_true
+    same?(result["list"][0], base["list"][0]).should be_true
+    same?(result["a"]["payload"], payload).should be_true
+    same?(result["a"], base["a"]).should be_false
+  end
+
+  it "protects root replacement payloads before later object and array edits" do
+    payload = j(%({"list":[1,2],"object":{"k":1}}))
+    result = Delta.apply_immutable(j("{}"), [
+      Op::Replace.new(payload),
+      Op::Splice.new(path("list"), 0, 1, [] of JSON::Any),
+      Op::Set.new(path("object", "k"), JSON::Any.new(2_i64)),
+    ] of Op)
+    payload.should eq j(%({"list":[1,2],"object":{"k":1}}))
+    result.should eq j(%({"list":[2],"object":{"k":2}}))
+  end
+
+  it "shares one private copy-on-write scope across batch partitions" do
+    base = j(%({"values":[1],"text":"a"}))
+    batches = [
+      ops(%([["p",["values"],1,0,[2]]])),
+      ops(%([["p",["values"],2,0,[3]],["a",["text"],"b"]])),
+      ops(%([["s",["values",0],0]])),
+    ]
+    result = Delta.apply_immutable_batches(base, batches)
+    result.should eq j(%({"values":[0,2,3],"text":"ab"}))
+    base.should eq j(%({"values":[1],"text":"a"}))
+  end
+
+  it "allows one immutable batch to fan out without mutating shared payloads" do
+    base = j(%({"rows":[]}))
+    batch = ops(%([["p",["rows"],0,0,[{"id":1}]],["s",["rows",0,"id"],2]]))
+    first = Delta.apply_immutable(base, batch)
+    second = Delta.apply_immutable(base, batch)
+    first.should eq j(%({"rows":[{"id":2}]}))
+    second.should eq j(%({"rows":[{"id":2}]}))
+    batch[0].as(Op::Splice).items[0].should eq j(%({"id":1}))
+  end
+
+  it "appends to an array not yet copied in one copy, sharing everything else" do
+    base = j(%({"log":{"entries":[1,2]},"other":{"x":1}}))
+    result = Delta.apply_immutable(base, ops(%([["p",["log","entries"],2,0,[3]]])))
+    result.should eq j(%({"log":{"entries":[1,2,3]},"other":{"x":1}}))
+    base["log"]["entries"].should eq j("[1,2]")
+    same?(result["other"], base["other"]).should be_true
+  end
+
+  it "rejects unresolvable paths" do
+    expect_raises(PathError) { Delta.apply_immutable(j(%({"a":1})), ops(%([["s",["a","b"],1]]))) }
+    expect_raises(PathError) { Delta.apply_immutable(j(%({"a":1})), ops(%([["s",["missing","b"],1]]))) }
+  end
+
+  it "handles tracker-produced batches across revision boundaries" do
+    tracker = Delta.track(j(%({"rows":[],"text":""})))
+    replica = tracker.value
+    batches = [] of Array(Op)
+    5.times do |index|
+      change = tracker.begin_change
+      change.state["rows"] << {"id" => index}
+      change.state["text"] = change.state["text"].as_s + index.to_s
+      prepared = change.prepare
+      tracker.adopt(prepared)
+      batches << prepared.ops
+      replica = Delta.apply_immutable(replica, prepared.ops)
     end
+    replica.should eq tracker.value
+    Delta.apply_immutable_batches(j(%({"rows":[],"text":""})), batches).should eq tracker.value
   end
 end

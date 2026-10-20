@@ -1,19 +1,59 @@
 # src/llm/chord/context.cr
-class LLM::Chord::Context
-  def initialize
-    @entries = {} of String => JSON::Any
+module LLM::Chord
+  abstract class AnyContextKey
+    getter description : String
+
+    def initialize(@description : String = "anonymous"); end
   end
 
-  def provide(name : String, value : JSON::Any) : Nil
-    raise ArgumentError.new("context entry already provided: #{name}") if @entries.has_key?(name)
-    @entries[name] = value
+  class ContextKey(T) < AnyContextKey
   end
 
-  def require(name : String) : JSON::Any
-    @entries[name]? || raise ArgumentError.new("context entry is missing: #{name}")
+  abstract class Context
+    BACKGROUND = EmptyContext.new("[Context BACKGROUND_CONTEXT]")
+    TODO       = EmptyContext.new("[Context TODO_CONTEXT]")
+
+    def value(key : ContextKey(T)) : T? forall T
+      context = self
+      while context.is_a?(ValueContext)
+        return Box(T).unbox(context.slot) if context.key.same?(key)
+        context = context.parent
+      end
+      nil
+    end
+
+    def with_value(key : ContextKey(T), value : T) : Context forall T
+      ValueContext.new(self, key, Box(T).box(value))
+    end
+
+    def to_s(io : IO) : Nil
+      io << name
+    end
+
+    def inspect(io : IO) : Nil
+      to_s(io)
+    end
+
+    protected abstract def name : String
   end
 
-  def fetch(name : String) : JSON::Any?
-    @entries[name]?
+  class EmptyContext < Context
+    def initialize(@label : String); end
+
+    protected def name : String
+      @label
+    end
+  end
+
+  class ValueContext < Context
+    getter parent : Context
+    getter key : AnyContextKey
+    getter slot : Void*
+
+    def initialize(@parent : Context, @key : AnyContextKey, @slot : Void*); end
+
+    protected def name : String
+      "#{@parent}.WithValue(#{@key.description})"
+    end
   end
 end
