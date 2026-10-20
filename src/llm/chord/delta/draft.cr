@@ -43,6 +43,82 @@ module LLM::Chord::Delta
       raw << Json.to_any(value)
     end
 
+    def push(*values) : Int32
+      raw = @value.raw
+      raise Exception.new("Draft is not an array") unless raw.is_a?(Array)
+      values.each { |value| raw << Json.to_any(value) }
+      raw.size
+    end
+
+    def pop : JSON::Any?
+      raw = @value.raw
+      raise Exception.new("Draft is not an array") unless raw.is_a?(Array)
+      raw.pop?
+    end
+
+    def shift : JSON::Any?
+      raw = @value.raw
+      raise Exception.new("Draft is not an array") unless raw.is_a?(Array)
+      raw.shift?
+    end
+
+    def unshift(*values) : Int32
+      raw = @value.raw
+      raise Exception.new("Draft is not an array") unless raw.is_a?(Array)
+      raw[0, 0] = values.map { |value| Json.to_any(value) }
+      raw.size
+    end
+
+    def splice(index : Int, remove : Int, *items) : Array(JSON::Any)
+      raw = @value.raw
+      raise Exception.new("Draft is not an array") unless raw.is_a?(Array)
+      removed = raw[index, remove]
+      raw[index, remove] = items.map { |item| Json.to_any(item) }
+      removed
+    end
+
+    def delete_at(index : Int) : JSON::Any
+      raw = @value.raw
+      raise Exception.new("Draft is not an array") unless raw.is_a?(Array)
+      raw.delete_at(index)
+    end
+
+    def delete(key : String) : Nil
+      raw = @value.raw
+      raise Exception.new("Draft is not an object") unless raw.is_a?(Hash)
+      raw.delete(key)
+    end
+
+    def size : Int32
+      raw = @value.raw
+      raise Exception.new("Draft is not an array") unless raw.is_a?(Array)
+      raw.size
+    end
+
+    def empty? : Bool
+      raw = @value.raw
+      raise Exception.new("Draft is not an array") unless raw.is_a?(Array)
+      raw.empty?
+    end
+
+    def reverse! : Draft
+      raw = @value.raw
+      raise Exception.new("Draft is not an array") unless raw.is_a?(Array)
+      raw.reverse!
+      self
+    end
+
+    def sort! : Draft
+      sort! { |a, b| a.to_json <=> b.to_json }
+    end
+
+    def sort!(&block : JSON::Any, JSON::Any -> Int32) : Draft
+      raw = @value.raw
+      raise Exception.new("Draft is not an array") unless raw.is_a?(Array)
+      raw.sort! { |a, b| block.call(a, b) }
+      self
+    end
+
     def as_s : String
       @value.as_s
     end
