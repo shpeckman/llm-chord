@@ -84,17 +84,20 @@ module LLM::Chord
     @on_error : Reporter
     @linger_types : Hash(String, Time::Span)
     @linger_cap : Int32
+    @loader : Proc(Array(String), Array(Facet))?
 
     def initialize(*, self principal, @name : String = "host", principal_key : Proc(JSON::Any, String)? = nil,
                    @dev : Bool = false, on_error = nil, @ready_timeout : Time::Span? = 60.seconds,
                    @kind : PeerKind = PeerKind::Host, upstream : Upstream? = nil,
-                   linger : Hash(String, Time::Span)? = nil, linger_cap : Int32 = 4)
+                   linger : Hash(String, Time::Span)? = nil, linger_cap : Int32 = 4,
+                   loader : Proc(Array(String), Array(Facet))? = nil)
       @principal = Chord.json_value(principal)
       @principal_key = principal_key || Host.canonical_key
       @self_key = @principal_key.call(@principal)
       @on_error = Host.reporter(on_error)
       @linger_types = linger || {} of String => Time::Span
       @linger_cap = linger_cap
+      @loader = loader
       @current = CodeVersionState.new(1, {} of String => Service, {} of String => RegistryTable,
         {} of String => Int32, AbortController.new)
       @code_versions[1] = @current
