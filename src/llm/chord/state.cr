@@ -222,18 +222,18 @@ module LLM::Chord
   end
 
   class AttachedReplicatedState < ReplicatedState
-    def self.attach(source : ReplicatedStateSource, on_error : Proc(Exception, Nil)) : AttachedReplicatedState
+    def self.attach(source : ReplicatedStateSource, on_error : Proc(Exception, Nil), async : Bool = false) : AttachedReplicatedState
       attachment = source.attach
-      state = new(attachment, on_error)
+      state = new(attachment, on_error, async)
       state.activate
       state
     end
 
-    def initialize(@attachment : ReplicatedStateSourceAttachment, @on_error : Proc(Exception, Nil))
+    def initialize(@attachment : ReplicatedStateSourceAttachment, @on_error : Proc(Exception, Nil), async : Bool = false)
       snapshot = @attachment.snapshot
       @cursor = snapshot.cursor
       @disposed = false
-      super(Publisher.new(snapshot.value, @on_error))
+      super(Publisher.new(snapshot.value, @on_error, async))
     end
 
     def activate : Nil
