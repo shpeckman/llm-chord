@@ -112,7 +112,7 @@ module LLM::Chord
       end
     end
 
-    private def wait_for_retirement : Nil
+    protected def wait_for_retirement : Nil
       host = @host
       previous = host.previous
       return unless previous
@@ -351,7 +351,7 @@ module LLM::Chord
       dry_run(candidate)
     end
 
-    private def rollback : Nil
+    protected def rollback : Nil
       return if @rolled_back
       @rolled_back = true
       @abort.abort(ChordError.new(ErrorCode::Aborted, "reload aborted"))

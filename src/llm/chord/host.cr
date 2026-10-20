@@ -234,6 +234,25 @@ module LLM::Chord
       @on_error.call(error)
     end
 
+    protected def resolve(plugins : Array(PluginRef)) : Array(Facet)
+      modules = plugins.select(String)
+      loaded = [] of Facet
+      unless modules.empty?
+        raise ArgumentError.new("loading modules needs create_host({ loader })") if @loader.nil?
+        loaded = @loader.not_nil!.call(modules)
+      end
+      index = 0
+      plugins.map do |ref|
+        if ref.is_a?(Facet)
+          ref
+        else
+          facet = loaded[index]
+          index += 1
+          facet
+        end
+      end
+    end
+
     def reload(facets : Enumerable(Facet), options : ReloadOptions = ReloadOptions.new) : ReloadReport
       if !@kind.client? && !@upstream.nil?
         raise ChordError.new(ErrorCode::Unavailable, "reloads are coordinated by the server", reason: "not_coordinator")
