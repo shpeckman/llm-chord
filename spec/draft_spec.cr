@@ -95,4 +95,68 @@ describe LLM::Chord::Delta::Draft do
     change = tracker.begin_change
     expect_raises(Exception) { change.state[0] = 1 }
   end
+
+  it "deletes object properties" do
+    tracker = track(JSON.parse(%({"a":1,"b":2})))
+    change = tracker.begin_change
+    change.state.delete("a")
+    tracker.adopt(change.prepare)
+    tracker.value.should eq JSON.parse(%({"b":2}))
+  end
+
+  describe "array mutators" do
+    it "pushes, pops, shifts and unshifts" do
+      tracker = track(JSON.parse(%({"arr":[2,3]})))
+      change = tracker.begin_change
+      change.state["arr"].push(4, 5).should eq 4
+      change.state["arr"].unshift(0, 1).should eq 6
+      change.state["arr"].pop.should eq JSON::Any.new(5_i64)
+      change.state["arr"].shift.should eq JSON::Any.new(0_i64)
+      tracker.adopt(change.prepare)
+      tracker.value.should eq JSON.parse(%({"arr":[1,2,3,4]}))
+    end
+
+    it "splices and deletes by index" do
+      tracker = track(JSON.parse(%({"arr":[0,1,2,3]})))
+      change = tracker.begin_change
+      removed = change.state["arr"].splice(1, 2, "x", "y")
+      removed.should eq [JSON::Any.new(1_i64), JSON::Any.new(2_i64)]
+      change.state["arr"].delete_at(0).should eq JSON::Any.new(0_i64)
+      tracker.adopt(change.prepare)
+      tracker.value.should eq JSON.parse(%({"arr":["x","y",3]}))
+    end
+
+    it "reverses and sorts in place" do
+      tracker = track(JSON.parse(%({"arr":[3,1,2]})))
+      change = tracker.begin_change
+      change.state["arr"].sort!
+      change.state["arr"].reverse!
+      tracker.adopt(change.prepare)
+      tracker.value.should eq JSON.parse(%({"arr":[3,2,1]}))
+    end
+
+    it "sorts with a comparator" do
+      tracker = track(JSON.parse(%({"arr":[10,2,30]})))
+      change = tracker.begin_change
+      change.state["arr"].sort! { |a, b| a.as_i <=> b.as_i }
+      tracker.adopt(change.prepare)
+      tracker.value.should eq JSON.parse(%({"arr":[2,10,30]}))
+    end
+
+    it "reports size and emptiness" do
+      tracker = track(JSON.parse(%({"arr":[1]})))
+      change = tracker.begin_change
+      change.state["arr"].size.should eq 1
+      change.state["arr"].empty?.should be_false
+      change.state["arr"].pop
+      change.state["arr"].empty?.should be_true
+    end
+
+    it "rejects mutators on a non-array" do
+      tracker = track(JSON.parse(%({"a":1})))
+      change = tracker.begin_change
+      expect_raises(Exception) { change.state["a"].push(1) }
+      expect_raises(Exception) { change.state["a"].pop }
+    end
+  end
 end
