@@ -24,7 +24,11 @@ module LLM::Chord::Schema
   end
 
   def self.canonical_json(value : JSON::Any?) : String
-    String.build { |io| write_canonical(io, value) }
+    String.build { |io| write_json(io, value, true) }
+  end
+
+  def self.stringify(value : JSON::Any?) : String
+    String.build { |io| write_json(io, value, false) }
   end
 
   def self.canonical_json(value : TypeBox::Schema) : String
@@ -98,7 +102,7 @@ module LLM::Chord::Schema
     true
   end
 
-  private def self.write_canonical(io : IO, value : JSON::Any?) : Nil
+  private def self.write_json(io : IO, value : JSON::Any?, sorted : Bool) : Nil
     case raw = value.try(&.raw)
     when Nil            then io << "null"
     when Bool           then io << raw
@@ -108,16 +112,17 @@ module LLM::Chord::Schema
       io << '['
       raw.each_with_index do |item, index|
         io << ',' if index > 0
-        write_canonical(io, item)
+        write_json(io, item, sorted)
       end
       io << ']'
     when Hash
       io << '{'
-      raw.keys.sort_by!(&.to_utf16.to_a).each_with_index do |key, index|
+      keys = sorted ? raw.keys.sort_by!(&.to_utf16.to_a) : raw.keys
+      keys.each_with_index do |key, index|
         io << ',' if index > 0
         write_string(io, key)
         io << ':'
-        write_canonical(io, raw[key])
+        write_json(io, raw[key], sorted)
       end
       io << '}'
     end

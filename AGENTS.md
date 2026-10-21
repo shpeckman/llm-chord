@@ -4,17 +4,19 @@
 
 `llm-chord` is a Crystal port of
 [`@earendil-works/chord`](https://github.com/earendil-works/pi/tree/main/packages/chord).
-It is being ported in phases tracked in `ROADMAP.md`. Phases 1–7 are done:
+It is being ported in phases tracked in `ROADMAP.md`. Phases 1–8 are done:
 the delta module, replicated state, Context (values, cancellation,
 telemetry), errors, output,
 schemas, contracts, the single-process runtime (hosts, objects, cells,
 references, roots, facets, registries), the wire protocol and links (memory,
 IPC, WebSocket; relays and routes), and child host processes (host manager,
-fork driver, child control, process lock), and in-process reload (code
-versions, gates, migration, retirement, cluster reloads and reconciliation)
-follow upstream semantics. SQLite is not ported yet. Values are `JSON::Any`.
+fork driver, child control, process lock), in-process reload (code
+versions, gates, migration, retirement, cluster reloads and reconciliation),
+and SQLite (the portable database interface, migrations, the crystal-sqlite3
+adapter, and the SQLite telemetry recorder) follow upstream semantics.
+Upstream's Cloudflare adapter is out of scope. Values are `JSON::Any`.
 
-There are two dependencies:
+There are three dependencies:
 
 - the `typebox` shard (`github: shpeckman/typebox`), a port of TypeBox
   1.3.27's builders and `Value` functions. Schema behavior belongs there;
@@ -22,7 +24,10 @@ There are two dependencies:
 - the `llm-telemetry` shard (`github: shpeckman/llm-telemetry`), the
   `@earendil-works/pi-telemetry` subset chord uses: span, metrics,
   propagation and store contracts, no-op implementations, the in-memory
-  recorder, and `render_trace`. Telemetry behavior belongs there.
+  recorder, `render_trace`, clocks, and the adapter and store conformance
+  suites (`require "llm-telemetry/testing"`). Telemetry behavior belongs there.
+- `crystal-sqlite3` (`github: crystal-lang/crystal-sqlite3`, `~> 0.24.0`) on
+  `crystal-db` 0.15, used only by `src/llm/chord/sqlite/sqlite3.cr`.
 
 Upstream is the specification. When behavior is in doubt, read the upstream
 source and tests (`packages/chord/src`, `packages/chord/test`) and match them.
@@ -31,6 +36,8 @@ source and tests (`packages/chord/src`, `packages/chord/test`) and match them.
 
 ```
 src/llm-chord.cr                   Entry point: requires the tree, opens LLM::Chord
+src/llm-chord/sqlite.cr            Entry point for `require "llm-chord/sqlite"` (llm-chord plus the SQLite module)
+src/llm-chord/telemetry-sqlite.cr  Entry point for `require "llm-chord/telemetry-sqlite"`
 src/llm/chord/json.cr              deep_copy, copy_json, identical?, equal?, to_any, js_string
 src/llm/chord/errors.cr            ChordError, ErrorCode, AggregateError, helpers
 src/llm/chord/context.cr           Context, ContextKey(T), AbortSignal/AbortController, await, telemetry
@@ -67,8 +74,15 @@ src/llm/chord/link.cr              Link, BaseLink, MemoryLink, IpcChannel, IpcLi
 src/llm/chord/connection.cr        LinkOptions, Connection: hello, holds, units, flow control, calls, relays
 src/llm/chord/websocket.cr         WebSocketLink, accept_web_sockets
 src/llm/chord/manager.cr           Fork driver (posix_spawn), HostManager, ChildControl, process_lock
+src/llm/chord/sqlite/database.cr   Value, Row, Error, Executor, Database (upstream sqlite/database.ts)
+src/llm/chord/sqlite/schema.cr     validate_schema_prefix (sqlite/schema.ts)
+src/llm/chord/sqlite/migrations.cr Migration, apply_migrations (sqlite/migrations.ts)
+src/llm/chord/sqlite/sqlite3.cr    SerialQueue, Sqlite3Database, Sqlite3Transaction, open_database (sqlite/node.ts)
+src/llm/chord/telemetry_sqlite/recorder.cr  SqliteTelemetry: recording, buffering, flush/close, create_sqlite_telemetry (telemetry-sqlite/index.ts)
+src/llm/chord/telemetry_sqlite/store.cr     SqliteTelemetry.get_trace/find_traces/find_metrics (telemetry-sqlite/store.ts)
 spec/                              Crystal specs, largely translated from upstream tests
 spec/fixtures/                     Child processes for the manager specs (Crystal worker, Node child)
+spec/support/                      Shared spec code: the SQLite telemetry fixtures and spy database
 conformance/                       Crystal ↔ Node link conformance harness (run.sh, needs CHORD_SRC)
 bench/                             Release-mode micro-benchmarks
 ROADMAP.md                         Porting phases and settled design decisions
@@ -88,7 +102,8 @@ crystal run bench/bench.cr --release
 `Naming/QueryBoolMethods`, `Lint/NotNil`, and `Metrics/CyclomaticComplexity`.
 The specs never hit the network; the WebSocket specs listen on 127.0.0.1 and
 `spec/manager_spec.cr` builds `spec/fixtures/worker.cr` into the temporary
-directory. The Node child spec is pending when `node` is missing.
+directory. The Node child spec is pending when `node` is missing. The SQLite
+specs need libsqlite3 (3.37+) and use in-memory databases.
 `conformance/run.sh` needs upstream chord's sources in `CHORD_SRC`.
 
 ## Code standards
@@ -231,3 +246,39 @@ directory. The Node child spec is pending when `node` is missing.
   through `Process.new(Crystal::System::Process.new(pid))`. IPC is Node's
   `json` serialization over fd 3, so Crystal and Node children are
   interchangeable.
+- SQLite follows upstream's `sqlite/` and `telemetry-sqlite/` file by file.
+  Upstream promises map to blocking calls: `Sqlite3Database` runs every
+  operation through a `SerialQueue`, a FIFO handoff queue (one channel per
+  waiter, release hands the turn to the next waiter), because a `Mutex` lets
+  a releasing fiber barge ahead of waiters and upstream guarantees call order.
+  A transaction holds the queue for its whole block.
+- crystal-sqlite3 prepares statements with `sqlite3_prepare_v2` and ignores
+  the SQL after the first statement, and its own transactions use plain
+  `BEGIN`. So `exec` calls `LibSQLite3.exec` on `Connection#to_unsafe`, and
+  transactions run `BEGIN IMMEDIATE`/`COMMIT`/`ROLLBACK` through it. The
+  connection is built directly (`SQLite3::Connection.new`), not through
+  `DB.open`'s pool, so `:memory:` is one database and paths need no URI
+  encoding.
+- `Executor`'s abstract methods take `Array(Value)` (`run_values`,
+  `get_values`, `all_values`); `run`/`get`/`all` are splat conveniences
+  defined once in the base class. A wrapper database (as in
+  `spec/support/telemetry_sqlite.cr`) must hold a concrete database type:
+  yielding through an abstract `Database` that includes the wrapper itself is
+  a recursive block expansion.
+- SQLite telemetry writes JSON with `Schema.stringify` (insertion order) and
+  series attributes with `Schema.canonical_json` (sorted keys), both exactly as
+  `JSON.stringify` writes them, so the database file is shared with Node
+  recorders (ROADMAP Phase 8 decision). Never use `to_json` for stored JSON.
+- `SqliteTelemetry` recognizes spans by type (`identity_of` over `LiveSpan`
+  and `ExtractedParent`), the equivalent of upstream's module-wide `WeakMap`.
+  Time, durations and the flush timer come from its `LLM::Telemetry::Clock`;
+  specs pass a `ManualClock` where upstream mocks `Date.now` or uses fake
+  timers. Specs replace `vi.spyOn(db, "transaction")` with `SpyDatabase`
+  (`before_transaction`, `failure`, counters), which resets its transaction
+  count after `create_sqlite_telemetry` because the migration runs one.
+- `spec/telemetry_sqlite_spec.cr` and `spec/telemetry_sqlite_store_spec.cr`
+  translate `telemetry-sqlite.test.ts` and `telemetry-sqlite-store.test.ts`
+  and run llm-telemetry's adapter (without the `metrics` group, as upstream)
+  and store conformance suites; `spec/sqlite_*_spec.cr` translate
+  `sqlite/migrations.test.ts` and `sqlite/node.test.ts`. The Durable Object
+  variants are not ported.
