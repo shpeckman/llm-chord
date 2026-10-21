@@ -1,9 +1,7 @@
 # src/llm-chord.cr
+require "llm-telemetry"
 require "./llm/chord/json"
 require "./llm/chord/errors"
-require "./llm/chord/telemetry"
-require "./llm/chord/telemetry/memory"
-require "./llm/chord/telemetry/render"
 require "./llm/chord/context"
 require "./llm/chord/output"
 require "./llm/chord/delta/types"

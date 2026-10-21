@@ -6,7 +6,7 @@
 [`@earendil-works/chord`](https://github.com/earendil-works/pi/tree/main/packages/chord).
 It is being ported in phases tracked in `ROADMAP.md`. Phases 1–7 are done:
 the delta module, replicated state, Context (values, cancellation,
-telemetry), the telemetry contracts and in-memory recorder, errors, output,
+telemetry), errors, output,
 schemas, contracts, the single-process runtime (hosts, objects, cells,
 references, roots, facets, registries), the wire protocol and links (memory,
 IPC, WebSocket; relays and routes), and child host processes (host manager,
@@ -14,9 +14,15 @@ fork driver, child control, process lock), and in-process reload (code
 versions, gates, migration, retirement, cluster reloads and reconciliation)
 follow upstream semantics. SQLite is not ported yet. Values are `JSON::Any`.
 
-The one dependency is the `typebox` shard (`github: shpeckman/typebox`), a port of
-TypeBox 1.3.27's builders and `Value` functions. Schema behavior belongs
-there; llm-chord only uses it.
+There are two dependencies:
+
+- the `typebox` shard (`github: shpeckman/typebox`), a port of TypeBox
+  1.3.27's builders and `Value` functions. Schema behavior belongs there;
+  llm-chord only uses it.
+- the `llm-telemetry` shard (`github: shpeckman/llm-telemetry`), the
+  `@earendil-works/pi-telemetry` subset chord uses: span, metrics,
+  propagation and store contracts, no-op implementations, the in-memory
+  recorder, and `render_trace`. Telemetry behavior belongs there.
 
 Upstream is the specification. When behavior is in doubt, read the upstream
 source and tests (`packages/chord/src`, `packages/chord/test`) and match them.
@@ -27,9 +33,6 @@ source and tests (`packages/chord/src`, `packages/chord/test`) and match them.
 src/llm-chord.cr                   Entry point: requires the tree, opens LLM::Chord
 src/llm/chord/json.cr              deep_copy, copy_json, identical?, equal?, to_any, js_string
 src/llm/chord/errors.cr            ChordError, ErrorCode, AggregateError, helpers
-src/llm/chord/telemetry.cr         Telemetry contracts, store types, no-op implementations
-src/llm/chord/telemetry/memory.cr  InMemoryTelemetryContext (recorder, propagation, metrics, store)
-src/llm/chord/telemetry/render.cr  render_trace
 src/llm/chord/context.cr           Context, ContextKey(T), AbortSignal/AbortController, await, telemetry
 src/llm/chord/output.cr            bound, sanitize, Buffer (streaming UTF-8 decoder), Progress, clocks
 src/llm/chord/delta/types.cr       Seg/Path/WireOp, Op hierarchy, from_tuple/to_tuple, validation, errors
@@ -129,11 +132,11 @@ directory. The Node child spec is pending when `node` is missing.
   excluded. Async subscriptions shift the next frame before spawning, which is
   the equivalent of a JavaScript async listener starting synchronously.
   Listener errors are always reported, never raised into the publisher.
-- Telemetry lives in `LLM::Chord::Telemetry` and mirrors the subset of
-  `@earendil-works/pi-telemetry` (`packages/telemetry`) that chord uses. The
-  in-memory recorder resolves carriers by concrete type
-  (`Telemetry.carrier_of`), the analogue of upstream's module-level WeakMap, so
-  links work across recorders.
+- Telemetry lives in the `llm-telemetry` shard as `LLM::Telemetry`; chord only
+  uses it (`Context#telemetry`, `#with_telemetry`, `#trace_in`). Inside
+  `LLM::Chord` and in specs (which `include LLM::Chord`), write the full
+  `LLM::Telemetry::` path. Changes to spans, metrics, propagation, the
+  in-memory recorder or `render_trace` belong in that shard.
 - Upstream promises map to blocking calls on fibers. Work that upstream starts
   without awaiting (an async listener, a progress `write`, `awaitWithContext`)
   is spawned; results come back through channels.

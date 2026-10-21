@@ -92,7 +92,8 @@ frames carry, so a Crystal child takes part in a Node coordinator's reload.
 - **Telemetry:** the pi-telemetry subset chord uses — span, context, metrics,
   propagation, and store contracts; the no-op context; the
   `InMemoryTelemetryContext` reference recorder with `TelemetryStore` queries;
-  `render_trace`.
+  `render_trace`. Since extracted into the `llm-telemetry` shard
+  (`LLM::Telemetry`), which llm-chord depends on.
 - **Errors:** `ChordError` with upstream's codes and reasons, `chord_error?`,
   `forbidden`, `invalid`, `as_chord_error`, `run_all`.
 - **Output:** `bound`, `sanitize`, `Buffer` with a WHATWG UTF-8 stream decoder

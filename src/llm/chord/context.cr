@@ -87,7 +87,7 @@ module LLM::Chord
 
   abstract class Context
     ABORT_SIGNAL_KEY = ContextKey(AbortSignal?).new("chord.abortSignal")
-    TELEMETRY_KEY    = ContextKey(Telemetry::TelemetrySpan).new("chord.telemetry")
+    TELEMETRY_KEY    = ContextKey(LLM::Telemetry::TelemetrySpan).new("chord.telemetry")
     BACKGROUND       = EmptyContext.new("[Context BACKGROUND_CONTEXT]")
     TODO             = EmptyContext.new("[Context TODO_CONTEXT]")
 
@@ -108,20 +108,20 @@ module LLM::Chord
       value(ABORT_SIGNAL_KEY)
     end
 
-    def telemetry : Telemetry::TelemetrySpan
-      value(TELEMETRY_KEY) || Telemetry::NOOP
+    def telemetry : LLM::Telemetry::TelemetrySpan
+      value(TELEMETRY_KEY) || LLM::Telemetry::NOOP
     end
 
-    def with_telemetry(span : Telemetry::TelemetrySpan) : Context
+    def with_telemetry(span : LLM::Telemetry::TelemetrySpan) : Context
       with_value(TELEMETRY_KEY, span)
     end
 
-    def trace_in(options : Telemetry::SpanOptions, &)
+    def trace_in(options : LLM::Telemetry::SpanOptions, &)
       telemetry.start_span(options) { |span| yield with_telemetry(span) }
     end
 
     def trace_in(name : String, &)
-      trace_in(Telemetry::SpanOptions.new(name)) { |context| yield context }
+      trace_in(LLM::Telemetry::SpanOptions.new(name)) { |context| yield context }
     end
 
     def with_abort_signal(signal : AbortSignal) : Context
