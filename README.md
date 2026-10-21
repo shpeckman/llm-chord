@@ -32,9 +32,14 @@ The port currently covers chord's foundation layer:
 - `LLM::Chord::HostManager` — child host processes: the fork driver (process
   groups, an IPC channel on `NODE_CHANNEL_FD`), the manager, the child's
   control channel, and the kernel `process_lock`.
+- Reload — chord's hot reload, in process: code versions with the two-version
+  rule and retirement, state versions and `migrate`, prepare in recording mode,
+  the gate with leases and grandfathered roots, exclusive resources, the
+  synchronous commit, and cluster reloads across hosts (prepare, vote, commit,
+  abort, retire; fencing and reconciliation of children that connect behind).
 
-Reload and SQLite are not ported yet; see [ROADMAP.md](ROADMAP.md). Values are
-Crystal's `JSON::Any`.
+SQLite is not ported yet; see [ROADMAP.md](ROADMAP.md). Values are Crystal's
+`JSON::Any`.
 
 ## Requirements
 
@@ -48,8 +53,8 @@ dependencies:
     github: shpeckman/llm-chord
 ```
 
-llm-chord depends on the `typebox` shard, referenced in its `shard.yml` as a
-sibling checkout (`path: ../typebox`).
+llm-chord depends on the `typebox` shard (`github: shpeckman/typebox` in its
+`shard.yml`).
 
 Then `shards install`, and in your code:
 
@@ -419,6 +424,8 @@ as `kind: :client` still autocast):
 | `dev` | Validates every cell write, and every value exposed as a remote state member, against its schemas. |
 | `on_error` | Receives errors from background work (disposal, listeners, tasks, host objects). Default: printed to `STDERR`. |
 | `ready_timeout` | How long an activation waits for its references to be ready and hydrated, and an awaited `get` for its reference (`unavailable/ready_timeout`). Default 60 s; `nil` waits forever. |
+| `task_stop_deadline` | How long a reload waits for an object's aborted tasks to finish before starting their replacements anyway (reported). Default 5 s. |
+| `loader` | `FacetLoader` (`Proc(Array(String), Array(Facet))`): resolves module names to facets for `load`, `reload` and the `prepare` frames of a cluster reload. |
 | `kind` | `:host` (default) or `:client` (a browser: never carries roots). |
 | `upstream` | The link to the parent: `C.upstream(link, principal: ..., **link_options)`. Also `connect` later. |
 | `linger`, `linger_cap` | Consumer-side linger of remote references: `{type_name => Time::Span}`; at most `linger_cap` (default 4) bindings linger. |
@@ -441,9 +448,13 @@ hashes, strings, `JSON::Any`).
 - `root(principal: nil, signal: nil) { |ctx| ... }` runs a call tree and
   returns the block's value. References taken with `ctx.get` are released when
   the root ends.
-- `install(facet, await_host_objects: true)`, `load(facets, await_host_objects: true)`
+- `install(facet, await_host_objects: true)`, `load(plugins, await_host_objects: true)`
   and `ready` start and await host-lifetime objects; `load` installs every
-  facet before awaiting any.
+  facet before awaiting any. `plugins` are facets or module names resolved by
+  the `loader`. A facet is installed once; later versions come with `reload`.
+- `reload(plugins, remove:, ...)` replaces facets in place (see
+  [Reload](#reload)). `code_version` and `previous_code_version` tell which
+  code versions the host retains.
 - `invalidate_principal { |principal| bool }` or `invalidate_principal(pattern)`
   force-disposes the objects of matching principals (never the host's own);
   a pattern matches principals whose listed fields are deep-equal.
@@ -458,13 +469,13 @@ unique per kind, and declarations are validated at activation.
 
 | Declaration | Meaning |
 | --- | --- |
-| `scope.state(name, schema, initial)` | A cell with an initial value (always validated). |
-| `scope.state(name, schema) { \|ctx\| value }` | A cell filled by an init that runs in its own root after the object's resources are open and its references live, before the object goes live. |
-| `scope.get(type, input = nil, principal: nil)` | A reference the object holds for its lifetime. Holding cycles raise `invalid/cycle`. |
-| `scope.resource(name, version:, deps:, exclusive:, close:) { \|signal\| value }` | Opened before the object goes live (after its `deps`, references or resources), closed in reverse order after it is disposed. `value` raises `not_ready` while any factory runs. |
-| `scope.on(name, source) { \|event, ctx\| }` | A listener on a readable (current value, then every new one) or a `Subscribable`. `on(name, resource)` listens to the resource's value; `on(name, resource, selector)` to `selector.call(value)`. Each event runs in a fresh root. |
-| `scope.task { \|ctx\| }` | Long-running work of the live object, aborted at disposal. Calls made with its ctx start fresh roots. |
-| `scope.derive(sources) { \|values\| value }` | A synchronous projection of readables, recomputed atomically with object writes and on publication of other sources. |
+| `scope.state(name, schema, initial, version: 1, migrate: nil)` | A cell with an initial value (always validated). A reload keeps the cell and its value by name (`initial` is ignored); a raised `version` runs `migrate` (`Proc(JSON::Any, Int32, T)`: old value, its version). |
+| `scope.state(name, schema, version: 1, migrate: nil) { \|ctx\| value }` | A cell filled by an init that runs in its own root after the object's resources are open and its references live, before the object goes live. A kept cell does not run it again. |
+| `scope.get(type, input = nil, principal: nil)` | A reference the object holds for its lifetime, kept across reloads by address. Holding cycles raise `invalid/cycle`. |
+| `scope.resource(name, version:, deps:, exclusive:, close:) { \|signal\| value }` | Opened before the object goes live (after its `deps`, references or resources), closed in reverse order after it is disposed. `value` raises `not_ready` while any factory runs. A reload keeps it unless `version`, `deps`, `exclusive` or its value type change; a kept resource adopts the new `open` and `close`. |
+| `scope.on(name, source) { \|event, ctx\| }` | A listener on a readable (current value, then every new one) or a `Subscribable`. `on(name, resource)` listens to the resource's value; `on(name, resource, selector)` to `selector.call(value)`. Each event runs in a fresh root. A reload keeps the subscription while its source and selector (the same proc literal) are unchanged and swaps the handler. |
+| `scope.task { \|ctx\| }` | Long-running work of the live object, aborted at disposal. Calls made with its ctx start fresh roots. A reload restarts it with the new code once the old run finished. |
+| `scope.derive(sources) { \|values\| value }` | A synchronous projection of readables, recomputed atomically with object writes and on publication of other sources. Every reload makes a new one. |
 | `scope.register(registry, entries)` | Registry entries (host-lifetime objects only). |
 | `scope.expose(resource)` | A member backed by a resource's value. |
 
@@ -536,10 +547,13 @@ host.root { |ctx| host.registry(Actions).get("addSample", ctx).try &.call(ctx) }
 
 `todo_store(input, scope)` stands for the factory body of the first example.
 A `FacetApi` has `serve`, `root`, `registry`, `name`, and `signal` (aborted
-when the facet is removed or the host closes). `define_registry(V, name,
-conflict: :error)` refuses two objects registering one key; `:last` keeps the
-later one. `RegistryView` has `table(ctx = nil)`, `get(key, ctx = nil)` and
-`subscribe { |table, code_version| }`; tables keep registration order.
+when this run of the facet is no longer installed: a committed reload replaced
+or removed it, the reload that loaded it aborted, or the host closed).
+`define_registry(V, name, conflict: :error)` refuses two objects registering
+one key; `:last` keeps the later one. `RegistryView` has `table(ctx = nil)`,
+`get(key, ctx = nil)` and `subscribe { |table, code_version| }`; tables are
+kept per code version (a ctx reads the table of its code version) and keep
+registration order.
 
 ## Links
 
@@ -639,6 +653,71 @@ control.ready
   the temporary directory elsewhere. It returns the release proc and raises
   `unavailable/locked` when another process holds it.
 
+## Reload
+
+A reload replaces facets while the host runs. Objects survive it: their cells,
+open resources, references and listener subscriptions are found again by name
+in the new factory's run. Facets are values compiled into the program, so a
+reload switches between facets the binary contains; shipping new Crystal code
+is a new binary (`HostManager#replace`), which a parent reconciles when it
+connects.
+
+```crystal
+facet = ->(greeting : String) do
+  C.define_facet("greeter") do |api|
+    api.serve(Greeter) do |_input, _principal, scope|
+      count = scope.state("count", T.object({n: T.number}), {n: 0})
+      C::Implementation.new.state("count", count).method("greet") { |name| "#{greeting} #{name}" }
+    end
+  end
+end
+
+host.install(facet.call("hello"))
+report = host.reload([facet.call("hi")])  # compatible: no gate, nothing waits
+report.code_version                       # the new code version; report.previous was current
+```
+
+`reload(plugins = [] of Facet, remove:, gate_deadline:, retire_deadline:,
+remote:, remote_remove:, vote_deadline:)` returns a `ReloadReport`
+(`code_version`, `previous`, `changed` and `removed` type names, `prepared` and
+`gated` object addresses, and `children`: each participating child's report).
+Reloads are serialized (`unavailable/reload_running`); a failed one raises its
+cause's code with the message `reload aborted: ...` and changes nothing.
+
+- **Prepare.** For each live object of a changed type, the new factory runs in
+  recording mode: cells are readable and writes raise `invalid/read_only`;
+  listeners, tasks and registrations are recorded; new non-exclusive resources
+  open. A cell whose schema changed without a raised `version` is refused, as
+  is a lowered version. Contracts are checked: the same contract version must
+  cover the old description (a forgotten bump is `contract_mismatch`), and
+  every surviving consumer and every facet's `uses` must bind, directly or
+  through `accepts`.
+- **Gate.** Only objects with a raised cell version or a replaced exclusive
+  resource are gated. Roots that already called them are grandfathered; other
+  old roots, and new objects of changed types, get `upgrade_conflict`
+  (retryable). The gate waits for grandfathered roots at most `gate_deadline`
+  (5 s; `aborted/gate_deadline` names the blocking roots), swaps exclusive
+  resources, and runs `migrate` into private copies, validated against every
+  schema that will apply.
+- **Commit.** One synchronous step installs the new code version: implementations,
+  migrated values (subscribers see a reset), registry tables, new derivations,
+  rebound listeners and restarted tasks; references see a shape push, and
+  browser references that no longer bind become `gone` with `upgrade_required`.
+- **Two-version rule.** A host keeps the current and the previous code version.
+  A call carrying a code version the host no longer has is `superseded`
+  (retryable). The previous code version retires when its last root ended (and,
+  on a child, its parent retired it). The next reload waits for that at most
+  `retire_deadline` (5 s), then aborts those roots, gives them a second, and
+  closes what only that code version declared.
+- **Clusters.** A host with child hosts (or given `remote:`) coordinates: it
+  sends `prepare` with the module names `remote` gives each child by host-name
+  prefix (longest wins), collects votes within `vote_deadline` (gate + retire
+  deadlines + 5 s), commits itself, then sends `commit` before anything of the
+  new code version can reach a child. A child cannot reload on its own
+  (`unavailable/not_coordinator`). A child that connects behind is fenced (its
+  roots' calls are admitted in the parent's code version) and reconciled by a
+  reload of the modules earlier cluster reloads gave it.
+
 ## Replicated state
 
 ```crystal
@@ -722,7 +801,10 @@ and reports to `on_error` (an `AggregateError` when disposal also fails).
 - `LLM::Chord.create_host`, `Host` (`#name`, `#principal`, `#dev?`, `#ready_timeout`,
   `#code_version`, `#previous_code_version`, `#serve`, `#install`, `#load`, `#ready`,
   `#get`, `#hold`, `#root`, `#registry`, `#invalidate_principal`, `#report`, `#close`),
-  `Lifetime`, `Accepts`, `Adapter`
+  `#reload`, `Lifetime`, `Accepts`, `Adapter`, `CodeVersion`
+- `ReloadReport` (`#code_version`, `#previous`, `#changed`, `#removed`, `#prepared`, `#gated`,
+  `#children`), `ReloadOptions`, `Migration`, `FacetLoader`, `DEFAULT_GATE_DEADLINE`,
+  `DEFAULT_RETIRE_DEADLINE`
 - `ObjectScope` (`#state`, `#get`, `#resource`, `#on`, `#task`, `#derive`, `#register`,
   `#expose`), `Implementation`, `MethodFn`, `MemberValue`, `OpaqueValue`, `OpaqueBox(T)`,
   `Exposed`, `Resource(T)` (`#key`, `#value`, `#version`, `#deps`, `#exclusive?`),
@@ -782,12 +864,18 @@ and reports to `on_error` (an `AggregateError` when disposal also fails).
   listener invocations and tasks run on their own fibers. Chord's async-factory
   check has no equivalent.
 - `linger` and `ready_timeout` are `Time::Span`s.
-- Facets are values: Crystal cannot load code at runtime, so module paths and
-  loaders do not apply (see the roadmap's reload decision).
-- State versions, `migrate`, and `reload` come with reload. Until then a host
-  answers a parent's `prepare` with a failed vote (`unavailable/reload_unsupported`),
-  and closes the link to a child host that runs an older code version instead
-  of reconciling it.
+- Facets are values: Crystal cannot load code at runtime, so a `FacetLoader`
+  maps module names to facets compiled into the program, and a reload switches
+  between them (see the roadmap's reload decision). Upstream's Node loader is
+  not ported.
+- A listener's selector counts as unchanged when it is the same proc literal
+  (`Proc#pointer`), where chord compares the function's source text.
+- A kept resource must also keep its value type: a resource whose block now
+  returns another type is a new resource.
+- Upstream's generation GC tests rely on V8's `FinalizationRegistry`; Crystal's
+  conservative collector cannot assert collection, so they are not ported. A
+  retired code version's implementations, declarations and cached adapter views
+  are dropped all the same.
 - `Link` is also the name of Crystal's top-level `@[Link]` annotation: code that
   includes `LLM::Chord` writes `LLM::Chord::Link`.
 - A remote state member whose value is `undefined` reads as JSON `null`.

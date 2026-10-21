@@ -34,6 +34,8 @@ require "./llm/chord/wire"
 require "./llm/chord/link"
 require "./llm/chord/connection"
 require "./llm/chord/host"
+require "./llm/chord/reload"
+require "./llm/chord/cluster"
 require "./llm/chord/websocket"
 require "./llm/chord/manager"
 

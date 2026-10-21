@@ -261,7 +261,10 @@ module LLM::Chord
     getter restamp : Proc(JSON::Any, JSON::Any?)?
     getter generation = 0
     getter peer_code_version : Int32? = nil
+    protected setter peer_code_version
     getter? synced : Bool
+    protected getter fenced_code_versions = ::Set(Int32).new
+    protected getter votes = {} of Int64 => Future(JSON::Any?)
     getter remotes = {} of Int64 => RemoteBinding
     getter calls = {} of Int64 => Future(Frame)
     getter served = {} of Int64 => Served
@@ -269,6 +272,7 @@ module LLM::Chord
     getter relayed_refs = {} of Int64 => RelayRef
     getter relayed_calls = {} of Int64 => RelayCall
     @parent_name : String? = nil
+    @admitted = {} of String => Int32
     @sync_waiters = [] of Future(Nil)
     @next_id = 1_i64
     @last_seen : Time::Instant = Time.instant
@@ -621,8 +625,8 @@ module LLM::Chord
       when "shape", "gone" then on_hold_reply(frame)
       when "result"        then on_result(frame)
       when "state"         then on_state(frame)
-      when "root_end"      then @host.foreign_root_ended(frame.string("rootId"), self)
-      when "vote"          then violation("vote from a non-participant")
+      when "root_end"      then on_root_end(frame.string("rootId"))
+      when "vote"          then on_vote(frame)
       when "invalidate", "prepare", "commit", "abort", "retire"
         on_control(frame)
       end
@@ -637,6 +641,25 @@ module LLM::Chord
       when "invalidate" then spawn { invalidate(frame["pattern"]) }
       when "retire"     then @host.allow_retire(frame.int("codeVersion").to_i32)
       else                   @host.on_reload_frame(self, frame)
+      end
+    end
+
+    private def on_root_end(root_id : String) : Nil
+      @admitted.delete(root_id)
+      @host.foreign_root_ended(root_id, self)
+    end
+
+    private def on_vote(frame : Frame) : Nil
+      unless @role.downstream? && @peer.kind.host?
+        violation("vote from a non-participant")
+        return
+      end
+      vote = @votes.delete(frame.int("reload"))
+      return unless vote
+      if error = frame["error"]?
+        vote.reject(Wire.from_error(error))
+      else
+        vote.resolve(frame["report"]?)
       end
     end
 
@@ -910,18 +933,28 @@ module LLM::Chord
       end
       controller = AbortController.new
       @incoming[id] = controller
-      root = @peer.kind.host? ? frame["root"]? : nil
+      root = @peer.kind.host? ? admit_root(frame["root"]?) : nil
       spawn { run_call(id, frame, served, root, controller) }
     end
 
-    private def run_call(id : Int64, frame : Frame, served : Served, root : JSON::Any?, controller : AbortController) : Nil
+    private def admit_root(root : JSON::Any?) : Tuple(String, Int32)?
+      return unless root
+      root_id = root["rootId"].as_s
+      code_version = root["codeVersion"].as_i
+      unless @role.downstream? && @fenced_code_versions.includes?(code_version) && !@host.has_code_version?(code_version)
+        return {root_id, code_version}
+      end
+      {root_id, @admitted[root_id] ||= @host.code_version}
+    end
+
+    private def run_call(id : Int64, frame : Frame, served : Served, root : Tuple(String, Int32)?, controller : AbortController) : Nil
       principal = case served
                   when ServedLocal then served.principal
                   when ServedRelay then served.relay.principal
                   else                  @principal
                   end
       result = if root
-                 @host.join_root(root["rootId"].as_s, root["codeVersion"].as_i, principal: principal,
+                 @host.join_root(root[0], root[1], principal: principal,
                    signal: controller.signal, from: self) { |ctx| perform(id, frame, served, ctx) }
                else
                  @host.root(principal: principal, signal: controller.signal) { |ctx| perform(id, frame, served, ctx) }
@@ -1030,6 +1063,8 @@ module LLM::Chord
       @incoming.clear
       @calls.each_value(&.reject(error))
       @calls.clear
+      @votes.each_value(&.reject(error))
+      @votes.clear
       waiters = @sync_waiters.dup
       @sync_waiters.clear
       waiters.each(&.reject(error))

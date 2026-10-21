@@ -100,6 +100,7 @@ module LLM::Chord
 
   class Cell < Source
     getter schema : TypeBox::Schema
+    protected setter schema
     @tracker : Delta::Tracker
     @guard : WriteGuard
     @initialized : Bool
@@ -157,6 +158,11 @@ module LLM::Chord
       Schema.assert_valid("state", "initial value of state #{key}", @schema, value)
       @tracker = Delta.track(Cell.box(value))
       @initialized = true
+    end
+
+    protected def reset(value : JSON::Any, schema : TypeBox::Schema) : Nil
+      @schema = schema
+      publish(@tracker.prepare_replace(Cell.box(value)), StateEvent::Kind::Reset, false)
     end
 
     protected def own_schemas : Array(Schema::Source)
@@ -250,8 +256,8 @@ module LLM::Chord
       @fn.call(@sources.map { |source| yield source })
     end
 
-    protected def attach : Nil
-      @value = compute(&.value)
+    protected def attach(precomputed : Hash(Readable, JSON::Any)? = nil) : Nil
+      @value = precomputed.try(&.[self]?) || compute(&.value)
       @sources.each do |source|
         if source.is_a?(Source)
           source.dependents << self
