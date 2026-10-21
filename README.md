@@ -9,10 +9,9 @@ The port currently covers chord's foundation layer:
 - `LLM::Chord.replicated_state` — chord's observable replicated state, either
   authoritative and mutable or attached to an external revision source.
 - `LLM::Chord::Context` — `@earendil-works/chord/context`: explicit
-  invocation-scoped values, cancellation, and telemetry spans.
-- `LLM::Chord::Telemetry` — the parts of `@earendil-works/pi-telemetry` chord
-  uses: span, metrics, propagation, and store contracts, the no-op context, the
-  in-memory reference recorder, and `render_trace`.
+  invocation-scoped values, cancellation, and telemetry spans. Telemetry comes
+  from the [`llm-telemetry`](https://github.com/shpeckman/llm-telemetry) shard
+  (`LLM::Telemetry`).
 - `LLM::Chord::Output` — `@earendil-works/chord/output`: bounded output
   streams and paced progress commits.
 - `LLM::Chord::ChordError` — chord's error codes and helpers.
@@ -53,8 +52,8 @@ dependencies:
     github: shpeckman/llm-chord
 ```
 
-llm-chord depends on the `typebox` shard (`github: shpeckman/typebox` in its
-`shard.yml`).
+llm-chord depends on the `typebox` shard (`github: shpeckman/typebox`) and the
+`llm-telemetry` shard (`github: shpeckman/llm-telemetry`) in its `shard.yml`.
 
 Then `shards install`, and in your code:
 
@@ -218,8 +217,8 @@ ancestor aborts; siblings are unaffected.
 ### Telemetry
 
 ```crystal
-recorder = LLM::Chord::Telemetry::InMemoryTelemetryContext.new
-recorder.start_span(LLM::Chord::Telemetry::SpanOptions.new("app.request")) do |span|
+recorder = LLM::Telemetry::InMemoryTelemetryContext.new
+recorder.start_span(LLM::Telemetry::SpanOptions.new("app.request")) do |span|
   context = LLM::Chord::Context::BACKGROUND.with_telemetry(span)
   context.trace_in("app.load") do |child|
     child.telemetry.add_event("cache.miss")
@@ -228,28 +227,13 @@ recorder.start_span(LLM::Chord::Telemetry::SpanOptions.new("app.request")) do |s
 end
 ```
 
-`context.telemetry` is the context's span, or `Telemetry::NOOP` when none was
-set. `trace_in(options)` (or `trace_in(name)`) runs the block in a child span
-and passes a derived context; the block's value and exceptions pass through.
-There is no ambient current span.
+`context.telemetry` is the context's span, or `LLM::Telemetry::NOOP` when none
+was set. `trace_in(options)` (or `trace_in(name)`) runs the block in a child
+span and passes a derived context; the block's value and exceptions pass
+through. There is no ambient current span.
 
-## Telemetry
-
-`Telemetry::TelemetryContext` starts spans around a block
-(`start_span(options) { |span| }`); a `Telemetry::TelemetrySpan` is also the
-parent context for its children and records `add_event`, `add_link`,
-`merge_attributes`, and `status=`. Contexts may expose `metrics` (`counter`,
-`up_down_counter`, `histogram`) and `propagation` (`inject` / `extract` of a
-string `Carrier`).
-
-- `Telemetry::NOOP`, `NOOP_METRICS`, `NOOP_PROPAGATION` record nothing.
-- `Telemetry::InMemoryTelemetryContext` is the reference recorder. A raised
-  exception marks its span as an error unless a status was set; recording on a
-  settled span is ignored and its children are inert. `recorded_spans` and
-  `recorded_metrics` return detached snapshots, and it implements
-  `TelemetryStore` (`find_traces` with paging, `get_trace`, `find_metrics`).
-- `Telemetry.render_trace(spans)` renders stored spans as an indented forest.
-- `Telemetry.attributes(key: value, ...)` builds an `Attributes` hash.
+Spans, metrics, propagation, the in-memory recorder, trace queries and
+`render_trace` are documented in the `llm-telemetry` shard's README.
 
 ## Output
 
@@ -773,12 +757,6 @@ and reports to `on_error` (an `AggregateError` when disposal also fails).
 - `LLM::Chord::Context` (`BACKGROUND`, `TODO`, `#value`, `#with_value`, `#abort_signal`,
   `#with_abort_signal`, `#without_abort_signal`, `#with_cancel`, `#await`, `#telemetry`,
   `#with_telemetry`, `#trace_in`), `ContextKey(T)`, `AbortSignal`, `AbortController`, `AbortError`
-- `LLM::Chord::Telemetry`: `TelemetryContext`, `TelemetrySpan`, `SpanOptions`, `SpanLink`,
-  `SpanStatus`, `SpanError`, `Attributes`, `Carrier`, `Metrics`, `Counter`, `UpDownCounter`,
-  `Histogram`, `InstrumentOptions`, `Propagation`, `TelemetryStore`, `StoredSpan`,
-  `StoredTrace`, `TraceQuery`, `TracePage`, `MetricQuery`, `StoredMetric`, `NOOP`,
-  `NOOP_METRICS`, `NOOP_PROPAGATION`, `InMemoryTelemetryContext`, `RecordedSpan`,
-  `RecordedMeasurement`, `.attributes`, `.render_trace`
 - `LLM::Chord::Output`: `Limits`, `Retain`, `Excerpt`, `Bounded`, `Skip`, `Buffer`,
   `Progress`, `Waiter`, `Clock`, `SYSTEM_CLOCK`, `.bound`, `.sanitize`, `.character_end`,
   `.utf8_byte_length`, `PROGRESS_BYTES_PER_SECOND`
@@ -845,10 +823,11 @@ and reports to `on_error` (an `AggregateError` when disposal also fails).
   `AbortError`.
 - `Output` works on UTF-8 Crystal strings. JavaScript lone surrogates have no
   equivalent, so the related upstream cases do not apply.
-- Telemetry span setters follow Crystal naming: `merge_attributes` for
-  `setAttributes`, `status=` for `setStatus`, and `recorded_spans` /
-  `recorded_metrics` for `getSpans` / `getMetrics`. pi-telemetry's typed schema
-  helpers are TypeScript type-level only and are not ported.
+- Telemetry is the separate `llm-telemetry` shard (`LLM::Telemetry`). Its span
+  setters follow Crystal naming: `merge_attributes` for `setAttributes`,
+  `status=` for `setStatus`, and `recorded_spans` / `recorded_metrics` for
+  `getSpans` / `getMetrics`. pi-telemetry's typed schema helpers are
+  TypeScript type-level only and are not ported.
 - Contracts carry no static types: chord's `Ref`, `ImplementationOf`, and
   `InputOf` are TypeScript type-level only. Contract construction errors are
   `ArgumentError` where chord throws `TypeError`, and `def` is `definition`.

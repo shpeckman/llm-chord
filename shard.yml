@@ -12,6 +12,8 @@ description: |
 dependencies:
   typebox:
     github: shpeckman/typebox
+  llm-telemetry:
+    github: shpeckman/llm-telemetry
 
 crystal: ">= 1.21.0"
 

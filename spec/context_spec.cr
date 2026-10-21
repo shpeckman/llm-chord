@@ -6,8 +6,8 @@ describe LLM::Chord::Context do
     key = ContextKey(String).new("value")
     Context::TODO.should_not be Context::BACKGROUND
     Context::TODO.abort_signal.should be_nil
-    Context::TODO.telemetry.should be Telemetry::NOOP
-    Context::BACKGROUND.telemetry.should be Telemetry::NOOP
+    Context::TODO.telemetry.should be LLM::Telemetry::NOOP
+    Context::BACKGROUND.telemetry.should be LLM::Telemetry::NOOP
     Context::TODO.value(key).should be_nil
     Context::BACKGROUND.to_s.should eq "[Context BACKGROUND_CONTEXT]"
     Context::TODO.to_s.should eq "[Context TODO_CONTEXT]"
@@ -101,27 +101,27 @@ describe LLM::Chord::Context do
   end
 
   it "derives telemetry independently from values and cancellation" do
-    telemetry = Telemetry::InMemoryTelemetryContext.new
-    other = Telemetry::InMemoryTelemetryContext.new
-    telemetry.start_span(Telemetry::SpanOptions.new("caller")) do |parent|
-      other.start_span(Telemetry::SpanOptions.new("other")) do |other_span|
+    telemetry = LLM::Telemetry::InMemoryTelemetryContext.new
+    other = LLM::Telemetry::InMemoryTelemetryContext.new
+    telemetry.start_span(LLM::Telemetry::SpanOptions.new("caller")) do |parent|
+      other.start_span(LLM::Telemetry::SpanOptions.new("other")) do |other_span|
         key = ContextKey(String).new("principal")
         controller = AbortController.new
         base = Context::BACKGROUND.with_abort_signal(controller.signal).with_value(key, "owner")
         context = base.with_telemetry(parent)
         replaced = context.with_telemetry(other_span)
-        base.telemetry.should be Telemetry::NOOP
+        base.telemetry.should be LLM::Telemetry::NOOP
         context.telemetry.should be parent
         replaced.telemetry.should be other_span
         replaced.value(key).should eq "owner"
         replaced.abort_signal.should be base.abort_signal
         context.without_abort_signal.telemetry.should be parent
-        context.trace_in(Telemetry::SpanOptions.new("outer")) do |child|
+        context.trace_in(LLM::Telemetry::SpanOptions.new("outer")) do |child|
           child.value(key).should eq "owner"
           child.abort_signal.should be context.abort_signal
           child.telemetry.add_event("started")
           child.trace_in("inner") do |nested|
-            nested.telemetry.add_link(Telemetry::SpanLink.new(child.telemetry))
+            nested.telemetry.add_link(LLM::Telemetry::SpanLink.new(child.telemetry))
             42
           end
         end.should eq 42
@@ -137,8 +137,8 @@ describe LLM::Chord::Context do
   end
 
   it "isolates concurrent trace_in branches and preserves results and errors" do
-    telemetry = Telemetry::InMemoryTelemetryContext.new
-    telemetry.start_span(Telemetry::SpanOptions.new("caller")) do |parent|
+    telemetry = LLM::Telemetry::InMemoryTelemetryContext.new
+    telemetry.start_span(LLM::Telemetry::SpanOptions.new("caller")) do |parent|
       context = Context::BACKGROUND.with_telemetry(parent)
       gate = Channel(Nil).new
       results = Channel(String).new(2)
@@ -165,7 +165,7 @@ describe LLM::Chord::Context do
       raised = expect_raises(ArgumentError) { context.trace_in("throw") { raise failure } }
       raised.should be failure
       Context::BACKGROUND.trace_in("noop") do |child|
-        child.telemetry.add_link(Telemetry::SpanLink.new(parent))
+        child.telemetry.add_link(LLM::Telemetry::SpanLink.new(parent))
         42
       end.should eq 42
     end
