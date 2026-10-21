@@ -4,6 +4,7 @@ module LLM::Chord
     Closed
     Opening
     Open
+    Unavailable
   end
 
   alias ResourceDep = Ref | AnyResource
@@ -20,6 +21,7 @@ module LLM::Chord
     abstract def open(signal : AbortSignal, order : Array(AnyResource)) : Nil
     abstract def close(order : Array(AnyResource)) : Nil
     abstract def subscribable : Subscribable
+    protected abstract def mark_unavailable : Nil
   end
 
   class Resource(T) < AnyResource
@@ -36,6 +38,7 @@ module LLM::Chord
     end
 
     def open_value : T
+      raise ChordError.new(ErrorCode::Unavailable, "resource #{key} could not be restored") if @state.unavailable?
       raise Chord.not_ready("resource #{key}") unless @state.open?
       @value.as(T)
     end
@@ -71,6 +74,16 @@ module LLM::Chord
     def subscribable : Subscribable
       current = open_value
       current.as?(Subscribable) || raise Chord.invalid("implementation", "resource #{key}: its value has no subscribe()")
+    end
+
+    protected def adopt(opener : Proc(AbortSignal, T), closer : Proc(T, Nil)?) : Nil
+      @opener = opener
+      @closer = closer
+    end
+
+    protected def mark_unavailable : Nil
+      @state = ResourceState::Unavailable
+      @value = nil
     end
   end
 

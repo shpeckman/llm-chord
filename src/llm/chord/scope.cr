@@ -3,27 +3,40 @@ module LLM::Chord
   class ObjectScope
     protected getter run = Run.new
 
-    def initialize(@object : ObjectImpl); end
+    def initialize(@object : ObjectImpl, @previous : Decls? = nil); end
 
-    def state(name : String, schema : TypeBox::Schema, initial) : Cell
-      declare_cell(name, schema, Chord.json_value(initial), nil)
+    def state(name : String, schema : TypeBox::Schema, initial, *, version : Int32 = 1, migrate = nil) : Cell
+      declare_cell(name, schema, version, ObjectScope.migration(migrate)) do
+        Cell.new(name, schema, Chord.json_value(initial), @object.guard, @object.host.source_options)
+      end
     end
 
-    def state(name : String, schema : TypeBox::Schema, &init : Ctx -> T) : Cell forall T
-      declare_cell(name, schema, nil, ObjectScope.init_fn(init))
+    def state(name : String, schema : TypeBox::Schema, *, version : Int32 = 1, migrate = nil,
+              &init : Ctx -> T) : Cell forall T
+      declare_cell(name, schema, version, ObjectScope.migration(migrate)) do
+        cell = Cell.new(name, schema, nil, @object.guard, @object.host.source_options)
+        @run.inits << {cell, ObjectScope.init_fn(init)}
+        cell
+      end
     end
 
     def get(type : Contract, input = nil, principal = nil, state : Bool = true) : Ref
       host = @object.host
+      candidate = !@previous.nil?
       chosen = principal.nil? ? host.principal : Chord.json_value(principal)
-      address = host.address_of(type, input, chosen)
+      address = host.address_of(type, input, chosen, candidate)
       if declared = @run.decls.refs[address]?
         unless declared.contract.fingerprint == type.fingerprint
           raise Chord.invalid("duplicate", "#{@object.type_name}: #{type.name} held twice with different contracts")
         end
         return declared
       end
-      ref = host.acquire(type, input, chosen, RefOwner::Object, @object, state)
+      existing = @previous.try(&.refs[address]?)
+      if existing && existing.contract.fingerprint == type.fingerprint && !existing.ended?
+        @run.decls.refs[address] = existing
+        return existing
+      end
+      ref = host.acquire(type, input, chosen, RefOwner::Object, @object, state, candidate)
       @run.decls.refs[address] = ref
       @run.created_refs << ref
       ref
@@ -83,11 +96,15 @@ module LLM::Chord
       raise Chord.invalid("duplicate", "#{@object.type_name}: duplicate #{kind} name #{name}") if map.has_key?(name)
     end
 
-    private def declare_cell(name : String, schema : TypeBox::Schema, initial : JSON::Any?, init : InitFn?) : Cell
+    private def declare_cell(name : String, schema : TypeBox::Schema, version : Int32, migration : Migration?, & : -> Cell) : Cell
       unique(@run.decls.cells, "state", name)
-      cell = Cell.new(name, schema, initial, @object.guard, @object.host.source_options)
-      @run.inits << {cell, init} if init
-      @run.decls.cells[name] = cell
+      raise ArgumentError.new("state #{name}: version must be a positive integer") if version < 1
+      cell = @previous.try(&.cells[name]?) || yield
+      decls = @run.decls
+      decls.cells[name] = cell
+      decls.cell_schemas[name] = schema
+      decls.cell_versions[name] = version
+      migration.try { |fn| decls.cell_migrations[name] = fn }
       cell
     end
 
@@ -96,6 +113,13 @@ module LLM::Chord
       unique(@run.decls.resources, "resource", name)
       resolved = [] of ResourceDep
       deps.try &.each { |dep| resolved << dep.as(ResourceDep) }
+      existing = @previous.try(&.resources[name]?)
+      if existing.is_a?(Resource(T)) && existing.version == version && existing.exclusive? == exclusive &&
+         ObjectScope.same_deps?(existing.deps, resolved)
+        @run.decls.adopted[existing] = ObjectScope.adopter(existing, opener, closer)
+        @run.decls.resources[name] = existing
+        return existing
+      end
       resource = Resource(T).new(name, version, exclusive, resolved, @object.host, opener, closer)
       @run.created_resources << resource
       @run.decls.resources[name] = resource
@@ -110,21 +134,22 @@ module LLM::Chord
       derived
     end
 
-    private def listen(name : String, origin : AnyResource | Subscribable, source : Proc(Subscribable), fn : ListenerFn) : Nil
+    private def listen(name : String, origin : AnyResource | Subscribable, selector : UInt64?, source : Proc(Subscribable),
+                       fn : ListenerFn) : Nil
       unique(@run.decls.listeners, "listener", name)
-      @run.decls.listeners[name] = ListenerDecl.new(origin, source, fn)
+      @run.decls.listeners[name] = ListenerDecl.new(origin, selector, source, fn)
     end
 
     private def listen_source(name : String, source : Subscribable, fn : ListenerFn) : Nil
-      listen(name, source, -> { source.as(Subscribable) }, fn)
+      listen(name, source, nil, -> { source.as(Subscribable) }, fn)
     end
 
     private def listen_resource(name : String, resource : AnyResource, fn : ListenerFn) : Nil
-      listen(name, resource, -> { resource.subscribable }, fn)
+      listen(name, resource, nil, -> { resource.subscribable }, fn)
     end
 
     private def listen_selected(name : String, resource : Resource(T), selector : Proc(T, U), fn : ListenerFn) : Nil forall T, U
-      listen(name, resource, -> { selector.call(resource.open_value).as(Subscribable) }, fn)
+      listen(name, resource, selector.pointer.address, -> { selector.call(resource.open_value).as(Subscribable) }, fn)
     end
 
     protected def self.init_fn(init : Proc(Ctx, T)) : InitFn forall T
@@ -133,6 +158,22 @@ module LLM::Chord
 
     protected def self.derive_fn(fn : Proc(Array(JSON::Any), T)) : Proc(Array(JSON::Any), JSON::Any) forall T
       ->(values : Array(JSON::Any)) { Chord.json_value(fn.call(values)) }
+    end
+
+    protected def self.migration(_migrate : Nil) : Migration?
+      nil
+    end
+
+    protected def self.migration(migrate : Proc(JSON::Any, Int32, U)) : Migration? forall U
+      ->(old : JSON::Any, from : Int32) { Chord.json_value(migrate.call(old, from)) }
+    end
+
+    protected def self.adopter(resource : Resource(T), opener : Proc(AbortSignal, T), closer : Proc(T, Nil)?) : Proc(Nil) forall T
+      -> { resource.adopt(opener, closer) }
+    end
+
+    protected def self.same_deps?(left : Array(ResourceDep), right : Array(ResourceDep)) : Bool
+      left.size == right.size && left.zip(right).all? { |(a, b)| a.same?(b) }
     end
 
     protected def self.closer(_close : Nil, _type : T.class) : Proc(T, Nil)? forall T

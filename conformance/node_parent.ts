@@ -37,7 +37,11 @@ for (let i = 0; i < 100 && (counter.count.value as { n: number } | undefined)?.n
 	await new Promise((resolve) => setTimeout(resolve, 10));
 assert.deepEqual(counter.count.value, { n: 5 });
 assert.deepEqual(values.at(-1), { n: 5 });
+const report = await server.reload([], { remote: { w1: ["counter"] } });
+assert.equal(report.children?.w1?.codeVersion, report.codeVersion);
+assert.deepEqual(report.children?.w1?.changed, ["t.conformance-counter"]);
+assert.equal(await counter.add(1), 15);
 child.send({ chord2control: { type: "shutdown" } });
 await new Promise<void>((resolve) => child.once("exit", () => resolve()));
 await server.close();
-console.log("node parent <-> crystal child over IPC: ok");
+console.log("node parent <-> crystal child over IPC, with a cluster reload: ok");

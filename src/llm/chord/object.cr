@@ -11,6 +11,7 @@ module LLM::Chord
   alias TaskFn = Proc(Ctx, Nil)
   alias InitFn = Proc(Ctx, JSON::Any)
   alias ListenerFn = Proc(JSON::Any, Ctx, Nil)
+  alias Migration = Proc(JSON::Any, Int32, JSON::Any)
 
   class Service
     getter contract : Contract
@@ -42,12 +43,16 @@ module LLM::Chord
     end
   end
 
-  record ListenerDecl, origin : AnyResource | Subscribable, source : Proc(Subscribable), fn : ListenerFn
+  record ListenerDecl, origin : AnyResource | Subscribable, selector : UInt64?, source : Proc(Subscribable), fn : ListenerFn
 
   class Decls
     getter cells = {} of String => Cell
+    getter cell_schemas = {} of String => TypeBox::Schema
+    getter cell_versions = {} of String => Int32
+    getter cell_migrations = {} of String => Migration
     getter refs = {} of String => Ref
     getter resources = {} of String => AnyResource
+    getter adopted = {} of AnyResource => Proc(Nil)
     getter listeners = {} of String => ListenerDecl
     getter tasks = {} of String => TaskFn
     getter derives = {} of String => Derived
@@ -77,6 +82,42 @@ module LLM::Chord
     end
   end
 
+  class Gate
+    getter grandfathered : ::Set(String)
+    getter queue = [] of Tuple(String, JSON::Any)
+    getter drained = Future(Nil).new
+
+    def initialize(@grandfathered : ::Set(String))
+      @drained.resolve(nil) if @grandfathered.empty?
+    end
+  end
+
+  class Subscription
+    getter origin : AnyResource | Subscribable
+    getter selector : UInt64?
+    property unsubscribe : Proc(Nil) = -> { }
+    property buffer : Array(JSON::Any)? = [] of JSON::Any
+    property state_source : Readable? = nil
+
+    def initialize(@origin : AnyResource | Subscribable, @selector : UInt64?); end
+
+    def same_source?(decl : ListenerDecl) : Bool
+      @origin == decl.origin && @selector == decl.selector
+    end
+  end
+
+  class StagedListeners
+    def initialize(@object : ObjectImpl, @fresh : Hash(String, Subscription), @kept : ::Set(String)); end
+
+    def activate : Nil
+      @object.switch_listeners(@fresh, @kept)
+    end
+
+    def discard : Nil
+      @fresh.each_value(&.unsubscribe.call)
+    end
+  end
+
   class ObjectImpl
     getter host : Host
     getter address : String
@@ -86,18 +127,23 @@ module LLM::Chord
     getter? host_lifetime : Bool
     getter status = ObjectStatus::Activating
     getter ready = Future(Nil).new
-    getter decls = Decls.new
     getter call_abort = AbortController.new
     getter implementations = {} of Int32 => Installed
-    @service : Service? = nil
-    @pending = ::Set(Decls).new
-    @refs = ::Set(LocalRef).new
-    @open_order = [] of AnyResource
+    protected property decls = Decls.new
+    protected property service : Service? = nil
+    protected property min_code_version = 0
+    protected property gate : Gate? = nil
+    protected property? deferred_runtime = false
+    protected getter pending = ::Set(Decls).new
+    protected getter refs = ::Set(LocalRef).new
+    protected getter leases = {} of String => Int32
+    protected getter open_order = [] of AnyResource
     @activation_abort = AbortController.new
-    @subscriptions = {} of String => Proc(Nil)
+    @subscriptions = {} of String => Subscription
     @invocations = ::Set(Future(Nil)).new
     @tasks = {} of String => Tuple(AbortController, Future(Nil))
     @stopped = ::Set(Future(Nil)).new
+    @task_runs = 0
     @linger_token = 0
     @lingering = false
     @disposal : Future(Nil)? = nil
@@ -151,6 +197,7 @@ module LLM::Chord
       validated = remote ? method : nil
       takes_args = method.nil? || !method.args.nil?
       input = takes_args ? method_input(remote ? wanted : nil, validated, name, args) : nil
+      lease(ctx)
       child = ctx.child(self)
       result = begin
         invoke { fn.call(input, child) }
@@ -195,6 +242,189 @@ module LLM::Chord
       disposal
     end
 
+    protected def run(service : Service, previous : Decls?) : Run
+      scope = ObjectScope.new(self, previous)
+      run = scope.run
+      @pending << run.decls
+      @host.in_factory += 1
+      implementation = begin
+        service.factory.call(@input, @principal, scope)
+      rescue error
+        @host.in_factory -= 1
+        discard(run)
+        raise error
+      end
+      @host.in_factory -= 1
+      run.implementation = implementation
+      begin
+        Chord.validate_implementation(service, implementation)
+      rescue error
+        discard(run)
+        raise error
+      end
+      run
+    end
+
+    protected def open(resources : Array(AnyResource), refs : Array(Ref), signal : AbortSignal) : Nil
+      opening = {} of AnyResource => Future(Nil)
+      futures = resources.map { |resource| open_one(resource, resources, opening, signal) }
+      references = Future(Nil).run { refs.each(&.ready.wait) }
+      ready = Future(Nil).run do
+        within_ready_timeout(references) { refs.select(&.status.loading?).map(&.address) }
+      end
+      Chord.await_all(futures + [ready])
+    end
+
+    protected def wait_hydrated(run : Run) : Nil
+      exposed = run.implementation.try(&.members) || {} of String => MemberValue
+      sources = run.created_derives.map(&.as(Readable))
+      exposed.each_value { |value| sources << value if value.is_a?(Readable) }
+      pending = sources.reject(&.hydrated?)
+      return if pending.empty?
+      work = Future(Nil).run { pending.each(&.wait_hydrated) }
+      within_ready_timeout(work) do
+        names = exposed.compact_map { |(name, value)| "#{@address}.#{name}" if value.is_a?(Readable) && !value.hydrated? }
+        names + run.created_derives.reject(&.hydrated?).map { |derived| "derive #{derived.key}" }
+      end
+    end
+
+    protected def init_cells(run : Run, signal : AbortSignal) : Nil
+      return if run.inits.empty?
+      futures = run.inits.map do |(cell, init)|
+        Future(Nil).run do
+          value = @host.root(signal: signal) { |ctx| init.call(ctx) }
+          cell.fill(value) unless signal.aborted?
+        end
+      end
+      Chord.await_all(futures)
+    end
+
+    protected def unwind(run : Run) : Nil
+      run.created_derives.each(&.detach)
+      resources = run.created_resources.sort_by { |resource| -(@open_order.index(resource) || -1) }
+      steps = [] of Proc(Nil)
+      resources.each { |resource| steps << -> { resource.close(@open_order) } }
+      run.created_refs.each { |ref| steps << -> { ref.release } }
+      Chord.run_all(steps, "#{@address}: cleanup failed")
+    end
+
+    protected def refresh_schemas : Nil
+      schemas = {} of Source => Array(Schema::Source)
+      @implementations.each_value do |installed|
+        Chord.member_schemas(installed.service, installed.implementation).each do |source, list|
+          (schemas[source] ||= [] of Schema::Source).concat(list)
+        end
+      end
+      all_decls.each do |decls|
+        decls.cells.each_value { |cell| cell.schemas = schemas[cell]? || [] of Schema::Source }
+        decls.derives.each_value { |derived| derived.schemas = schemas[derived]? || [] of Schema::Source }
+      end
+    end
+
+    protected def stage_listeners(decls : Decls) : StagedListeners
+      fresh = {} of String => Subscription
+      kept = ::Set(String).new
+      begin
+        decls.listeners.each do |key, decl|
+          previous = @subscriptions[key]?
+          if previous && previous.same_source?(decl)
+            kept << key
+            next
+          end
+          source = decl.source.call
+          entry = Subscription.new(decl.origin, decl.selector)
+          fresh[key] = entry
+          if source.is_a?(Readable)
+            entry.buffer = nil
+            entry.state_source = source
+            next
+          end
+          entry.unsubscribe = source.subscribe { |event| buffer_or_deliver(key, entry, event) }
+        end
+      rescue error
+        fresh.each_value(&.unsubscribe.call)
+        raise error
+      end
+      StagedListeners.new(self, fresh, kept)
+    end
+
+    protected def switch_listeners(fresh : Hash(String, Subscription), kept : ::Set(String)) : Nil
+      @subscriptions.to_a.each do |(key, subscription)|
+        next if kept.includes?(key)
+        subscription.unsubscribe.call
+        @subscriptions.delete(key)
+      end
+      fresh.each do |key, entry|
+        @subscriptions[key] = entry
+        if source = entry.state_source
+          entry.unsubscribe = source.subscribe { |event| deliver(key, event) }
+        end
+        buffered = entry.buffer || [] of JSON::Any
+        entry.buffer = nil
+        buffered.each { |event| deliver(key, event) }
+      end
+    end
+
+    protected def start_tasks : Nil
+      run = @task_runs += 1
+      if @stopped.empty?
+        start_all_tasks
+        return
+      end
+      stopped = @stopped.to_a
+      spawn { start_tasks_after(run, stopped, @host.task_stop_deadline) }
+    end
+
+    protected def stop_tasks : Nil
+      @task_runs += 1
+      @tasks.each_value do |(controller, done)|
+        controller.abort(ChordError.new(ErrorCode::Aborted, "task stopped"))
+        @stopped << done
+        done.on_settle { @stopped.delete(done); nil }
+      end
+      @tasks.clear
+    end
+
+    protected def open_gate : Nil
+      gate = @gate
+      @gate = nil
+      gate.try &.queue.each { |(key, event)| deliver(key, event) }
+    end
+
+    protected def admit(ctx : Ctx) : Nil
+      if @host.failed
+        raise ChordError.new(ErrorCode::Unavailable, "#{@host.name} failed and admits no work", reason: "host_failed")
+      end
+      unless @host.has_code_version?(ctx.code_version)
+        raise ChordError.new(ErrorCode::Superseded, "code version #{ctx.code_version} is retired")
+      end
+      if ctx.code_version < @min_code_version
+        raise ChordError.new(ErrorCode::UpgradeConflict, "#{@address} was upgraded in code version #{@min_code_version}")
+      end
+      gate = @gate
+      if gate && !gate.grandfathered.includes?(ctx.root_id)
+        raise ChordError.new(ErrorCode::UpgradeConflict, "#{@address} is being upgraded")
+      end
+    end
+
+    protected def lease(ctx : Ctx) : Nil
+      return if @leases.has_key?(ctx.root_id)
+      @leases[ctx.root_id] = ctx.code_version
+      @host.touch(ctx.root_id, self)
+    end
+
+    protected def root_ended(root_id : String) : Nil
+      @leases.delete(root_id)
+      gate = @gate
+      gate.drained.resolve(nil) if gate && gate.grandfathered.delete(root_id) && gate.grandfathered.empty?
+    end
+
+    protected def forget_views : Nil
+      services = @implementations.values.map(&.service)
+      implementations = @implementations.values.map(&.implementation)
+      @refs.each(&.forget_views(services, implementations))
+    end
+
     private def run_activation(after : Future(Nil)?) : Nil
       begin
         activate(after)
@@ -218,9 +448,9 @@ module LLM::Chord
       service = @host.service(@type_name)
       raise ChordError.new(ErrorCode::Unavailable, "#{@type_name} is not served", reason: "unknown_type") unless service
       @service = service
-      run = run_factory(service)
+      run = run(service, nil)
       begin
-        open(run.created_resources, run.created_refs)
+        open(run.created_resources, run.created_refs, signal)
         raise abandoned if signal.aborted?
         wait_hydrated(run)
         raise abandoned if signal.aborted?
@@ -228,19 +458,21 @@ module LLM::Chord
         raise abandoned if signal.aborted?
         @host.check_registrations(self, run.decls)
         @decls = run.decls
-        code_version = @host.code_version
-        @implementations[code_version] = Installed.new(code_version, service, run.implementation.not_nil!, run.decls)
+        install_retained(service, run)
         run.created_derives.each(&.attach)
         refresh_schemas
-        @host.registries_changed(self) unless run.decls.registrations.empty?
-        start_runtime
+        @deferred_runtime = !@implementations.has_key?(@host.code_version)
+        unless @deferred_runtime
+          @host.registries_changed(self) unless run.decls.registrations.empty?
+          start_runtime
+        end
         raise abandoned if signal.aborted?
         @status = ObjectStatus::Live
       rescue error
         @call_abort.abort(error)
         stop_listeners
         stop_tasks
-        registered = !@decls.registrations.empty?
+        registered = !@decls.registrations.empty? && !@deferred_runtime
         @implementations.clear
         @decls = Decls.new
         @host.registries_changed if registered
@@ -252,31 +484,19 @@ module LLM::Chord
       end
     end
 
-    private def abandoned : ChordError
-      ChordError.new(ErrorCode::Aborted, "#{@address} abandoned")
+    private def install_retained(service : Service, run : Run) : Nil
+      implementation = run.implementation.not_nil!
+      @host.retained_code_versions.each do |version|
+        next unless version.services[@type_name]?.same?(service)
+        @implementations[version.id] = Installed.new(version.id, service, implementation, run.decls)
+      end
+      pending = @host.pending_code_version
+      return if @implementations.has_key?(@host.code_version) || (pending && @implementations.has_key?(pending))
+      raise ChordError.new(ErrorCode::Superseded, "#{@address}: code changed during activation")
     end
 
-    private def run_factory(service : Service) : Run
-      scope = ObjectScope.new(self)
-      run = scope.run
-      @pending << run.decls
-      @host.in_factory += 1
-      implementation = begin
-        service.factory.call(@input, @principal, scope)
-      rescue error
-        @host.in_factory -= 1
-        discard(run)
-        raise error
-      end
-      @host.in_factory -= 1
-      run.implementation = implementation
-      begin
-        Chord.validate_implementation(service, implementation)
-      rescue error
-        discard(run)
-        raise error
-      end
-      run
+    private def abandoned : ChordError
+      ChordError.new(ErrorCode::Aborted, "#{@address} abandoned")
     end
 
     private def discard(run : Run) : Nil
@@ -288,17 +508,6 @@ module LLM::Chord
       unwind(run)
     rescue error
       @host.report(error)
-    end
-
-    private def open(resources : Array(AnyResource), refs : Array(Ref)) : Nil
-      signal = @activation_abort.signal
-      opening = {} of AnyResource => Future(Nil)
-      futures = resources.map { |resource| open_one(resource, resources, opening, signal) }
-      references = Future(Nil).run { refs.each(&.ready.wait) }
-      ready = Future(Nil).run do
-        within_ready_timeout(references) { refs.select(&.status.loading?).map(&.address) }
-      end
-      Chord.await_all(futures + [ready])
     end
 
     private def open_one(resource : AnyResource, resources : Array(AnyResource), opening : Hash(AnyResource, Future(Nil)),
@@ -325,19 +534,6 @@ module LLM::Chord
       future
     end
 
-    private def wait_hydrated(run : Run) : Nil
-      exposed = run.implementation.try(&.members) || {} of String => MemberValue
-      sources = run.created_derives.map(&.as(Readable))
-      exposed.each_value { |value| sources << value if value.is_a?(Readable) }
-      pending = sources.reject(&.hydrated?)
-      return if pending.empty?
-      work = Future(Nil).run { pending.each(&.wait_hydrated) }
-      within_ready_timeout(work) do
-        names = exposed.compact_map { |(name, value)| "#{@address}.#{name}" if value.is_a?(Readable) && !value.hydrated? }
-        names + run.created_derives.reject(&.hydrated?).map { |derived| "derive #{derived.key}" }
-      end
-    end
-
     private def within_ready_timeout(work : Future(Nil), & : -> Array(String)) : Nil
       timeout = @host.ready_timeout
       if timeout && work.wait([] of AbortSignal, timeout).timed_out?
@@ -350,57 +546,28 @@ module LLM::Chord
       work.wait
     end
 
-    private def init_cells(run : Run, signal : AbortSignal) : Nil
-      return if run.inits.empty?
-      futures = run.inits.map do |(cell, init)|
-        Future(Nil).run do
-          value = @host.root(signal: signal) { |ctx| init.call(ctx) }
-          cell.fill(value) unless signal.aborted?
-        end
-      end
-      Chord.await_all(futures)
-    end
-
-    private def unwind(run : Run) : Nil
-      run.created_derives.each(&.detach)
-      resources = run.created_resources.sort_by { |resource| -(@open_order.index(resource) || -1) }
-      steps = [] of Proc(Nil)
-      resources.each { |resource| steps << -> { resource.close(@open_order) } }
-      run.created_refs.each { |ref| steps << -> { ref.release } }
-      Chord.run_all(steps, "#{@address}: cleanup failed")
-    end
-
-    private def refresh_schemas : Nil
-      schemas = {} of Source => Array(Schema::Source)
-      @implementations.each_value do |installed|
-        Chord.member_schemas(installed.service, installed.implementation).each do |source, list|
-          (schemas[source] ||= [] of Schema::Source).concat(list)
-        end
-      end
-      all_decls.each do |decls|
-        decls.cells.each_value { |cell| cell.schemas = schemas[cell]? || [] of Schema::Source }
-        decls.derives.each_value { |derived| derived.schemas = schemas[derived]? || [] of Schema::Source }
-      end
-    end
-
     private def start_runtime : Nil
-      start_listeners
-      @decls.tasks.each_key { |key| start_task(key, @host.code_version) }
-    end
-
-    private def start_listeners : Nil
-      @decls.listeners.each do |key, decl|
-        source = decl.source.call
-        @subscriptions[key] = source.subscribe { |event| deliver(key, event) }
-      end
-    rescue error
-      stop_listeners
-      raise error
+      stage_listeners(@decls).activate
+      start_tasks
     end
 
     private def stop_listeners : Nil
-      @subscriptions.each_value(&.call)
+      @subscriptions.each_value(&.unsubscribe.call)
       @subscriptions.clear
+    end
+
+    private def start_tasks_after(run : Int32, stopped : Array(Future(Nil)), deadline : Time::Span) : Nil
+      missed = !Chord.settle_within(stopped, deadline)
+      return unless run == @task_runs && @status.live?
+      if missed
+        @host.report(ChordError.new(ErrorCode::Aborted,
+          "#{@address}: aborted tasks still running after #{Chord.milliseconds(deadline)} ms; starting their replacements anyway"))
+      end
+      start_all_tasks
+    end
+
+    private def start_all_tasks : Nil
+      @decls.tasks.each_key { |key| start_task(key, @host.code_version) }
     end
 
     private def start_task(key : String, code_version : Int32) : Nil
@@ -424,13 +591,12 @@ module LLM::Chord
       done.resolve(nil)
     end
 
-    private def stop_tasks : Nil
-      @tasks.each_value do |(controller, done)|
-        controller.abort(ChordError.new(ErrorCode::Aborted, "task stopped"))
-        @stopped << done
-        done.on_settle { @stopped.delete(done); nil }
+    private def buffer_or_deliver(key : String, entry : Subscription, event : JSON::Any) : Nil
+      if buffer = entry.buffer
+        buffer << event
+      else
+        deliver(key, event)
       end
-      @tasks.clear
     end
 
     private def deliver(key : String, event : JSON::Any) : Nil
@@ -438,6 +604,10 @@ module LLM::Chord
     end
 
     private def invoke_listener(key : String, event : JSON::Any) : Nil
+      if gate = @gate
+        gate.queue << {key, event}
+        return
+      end
       decl = @decls.listeners[key]?
       return if decl.nil? || !(@status.live? || @status.activating?)
       invocation = track(Future(Nil).new)
@@ -453,17 +623,13 @@ module LLM::Chord
     end
 
     private def run_listener(decl : ListenerDecl, event : JSON::Any, root : Ctx) : Nil
+      lease(root)
       child = root.child(self)
       begin
         decl.fn.call(event, child)
       ensure
         child.close
       end
-    end
-
-    private def admit(ctx : Ctx) : Nil
-      return if @host.code_version?(ctx.code_version)
-      raise ChordError.new(ErrorCode::Superseded, "code version #{ctx.code_version} is retired")
     end
 
     private def check_write(ctx : Ctx) : Nil
@@ -541,7 +707,7 @@ module LLM::Chord
       stop_tasks
       stop_listeners
       @invocations.to_a.each(&.await_settled)
-      registered = decls.any? { |set| !set.registrations.empty? }
+      registered = decls.any? { |set| !set.registrations.empty? } && !@deferred_runtime
       @implementations.clear
       @decls = Decls.new
       @host.registries_changed if registered

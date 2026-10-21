@@ -37,9 +37,9 @@ private class SavedDb
   getter saved = [] of String
 end
 
-private def todo_store(input : JSON::Any, scope : ObjectScope) : Implementation
+private def todo_store(input : JSON::Any, scope : ObjectScope, version : Int32 = 1, migrate = nil) : Implementation
   list = input["list"].as_s
-  rows = scope.state("rows", ROWS, [] of JSON::Any)
+  rows = scope.state("rows", ROWS, [] of JSON::Any, version: version, migrate: migrate)
   open_count = scope.derive([rows]) { |(todos)| todos.as_a.count { |todo| !todo["done"].as_bool } }
   Implementation.new
     .method("label") { "Todos for #{list}" }
@@ -260,6 +260,72 @@ describe "tutorial" do
     host.ready
     click.not_nil!.call.should eq 1
     host.registry(actions).table.size.should eq 1
+  ensure
+    host.try &.close
+  end
+
+  it "09: compatible reload, migration and an old-contract adapter" do
+    host = C.create_host(self: "server")
+    facet = ->(label : String) do
+      C.define_facet("todos") do |api|
+        api.serve(TODO_STORE) { |input, _principal, scope| todo_store(input, scope).method("label") { label } }
+      end
+    end
+    host.load([facet.call("Original")])
+    todos = host.get(TODO_STORE, {list: "family"})
+    todos.call("add", {text: "Buy milk"})
+    entered = Future(Nil).new
+    resume = Future(Nil).new
+    old_root = Future(Array(JSON::Any?)).run do
+      host.root do |ctx|
+        first = todos.call("label", ctx)
+        entered.resolve(nil)
+        resume.wait
+        [first, todos.call("label", ctx)]
+      end
+    end
+    entered.wait
+    compatible = host.reload([facet.call("Updated")])
+    compatible.gated.should be_empty
+    todos.call("label").should eq JSON::Any.new("Updated")
+    resume.resolve(nil)
+    old_root.wait.should eq [JSON::Any.new("Original"), JSON::Any.new("Original")]
+    todos.state("rows").value[0]["text"].should eq JSON::Any.new("Buy milk")
+
+    events = [] of StateEvent::Kind
+    stop_events = todos.state("rows").events { |event| events << event.kind }
+    upper = ->(old : JSON::Any, from : Int32) do
+      from.should eq 1
+      old.as_a.map { |todo| {text: todo["text"].as_s.upcase, done: todo["done"]} }
+    end
+    migrated = host.reload([C.define_facet("todos") do |api|
+      api.serve(TODO_STORE) { |input, _principal, scope| todo_store(input, scope, 2, upper) }
+    end])
+    migrated.gated.size.should eq 1
+    todos.state("rows").value.should eq j(%([{"text":"BUY MILK","done":false}]))
+    events.should eq [StateEvent::Kind::Snap, StateEvent::Kind::Reset]
+    stop_events.call
+
+    renamed_store = C.local("tutorial.todos", version: 2, input: T.object({list: T.string}), members: {
+      heading:   C.method(nil, T.string),
+      rows:      ROWS,
+      openCount: T.number,
+      add:       C.method(T.object({text: T.string})),
+      finish:    C.method(T.object({index: T.integer})),
+      reset:     C.method(ROWS),
+    })
+    adapter = ->(current : Implementation) { current.dup.tap { |view| view["label"] = current["heading"] } }
+    host.reload([C.define_facet("todos") do |api|
+      api.serve(renamed_store, accepts: {1 => adapter}) do |input, _principal, scope|
+        implementation = todo_store(input, scope, 2)
+        implementation["heading"] = implementation.delete("label").not_nil!
+        implementation
+      end
+    end])
+    todos.call("label").should eq JSON::Any.new("Todos for family")
+    newer = host.get(renamed_store, {list: "family"})
+    newer.call("heading").should eq JSON::Any.new("Todos for family")
+    todos.state("rows").value[0]["text"].should eq JSON::Any.new("BUY MILK")
   ensure
     host.try &.close
   end

@@ -46,24 +46,26 @@ fingerprints therefore needs the same JSON Schema data, not TypeBox itself.
 - A macro deriving schemas from Crystal structs may come later, emitting the
   same JSON.
 
-### 3. Hot reload: process-level, one worker binary per code version
+### 3. Hot reload: in process, facets as values
 
-Crystal cannot load new code into a running process, so a code version is a
-worker binary. A reload starts the new binary, runs prepare there (factories
-in recording mode), migrates state from the old process (already JSON), votes,
-and commits by switching routing; the old process keeps serving in-flight roots
-on the previous version until it retires. This reuses upstream's code versions,
-the two-version rule, cross-host prepare/vote/commit, child reconciliation, and
-the host manager.
+Revised for Phase 7. Upstream's reload is in process: objects survive it with
+their cells, open resources, references, leases and kept listener
+subscriptions, and `reload` takes facet values (its tests use nothing else);
+module paths are resolved through a pluggable `FacetLoader`. Crystal facets are
+values, so upstream's reload ports one to one: a reload switches between
+facets compiled into the program, and a `FacetLoader`
+(`Proc(Array(String), Array(Facet))`) resolves the module names that `prepare`
+frames carry, so a Crystal child takes part in a Node coordinator's reload.
 
-- Costs: reload granularity is a whole worker, not a single plugin; a reload
-  takes a process start plus a handshake; while both versions are live, calls
-  between them cross IPC.
-- Rejected: `dlopen`'d facet libraries (one GC and runtime per process, no
-  safe unloading); leaving reload out (acceptable only as a stopgap).
-- Constraint on earlier phases: Phases 4–6 treat the code version as an
-  attribute of a host that can be pinned to a process, never assuming the
-  current and previous versions share memory.
+- New Crystal code is a new binary: `HostManager#replace` starts it, and a
+  parent reconciles a child that connects behind its code version.
+- Rejected: process-level reload (one worker binary per code version, state
+  migrated from the old process). A new process cannot adopt the old one's open
+  resources, references or subscriptions, it would still need factories in
+  recording mode against existing cells, and it would add a state-transfer
+  protocol upstream does not have, with no upstream test to check it against.
+- Rejected earlier, still: `dlopen`'d facet libraries (one GC and runtime per
+  process, no safe unloading).
 
 ## Phase 1 — delta, Context values, replicated state ✅
 
@@ -133,11 +135,11 @@ the host manager.
   `host`, `readiness` and `principals`. Section 06 needs memory links and moves
   to Phase 5; section 09 needs reload and moves to Phase 7.
 - Code version is a host attribute (`Host#code_version`, carried by every
-  `Ctx`), pinnable to a process (decision 3); it stays 1 until reload.
+  `Ctx`); it stayed 1 until reload (Phase 7).
 - Deferred to the phases that need them: remote bindings, consumer-side
   linger and `GetOptions.state` (done in Phase 5); code-version retirement, gates,
   leases, staged listeners, `StateOptions` (`version`, `migrate`) and
-  `Cell#reset` (Phase 7).
+  `Cell#reset` (done in Phase 7).
 
 ## Phase 5 — wire protocol and links ✅
 
@@ -161,9 +163,8 @@ the host manager.
   WebSocket). It type-checks but has not yet been run against upstream's
   sources; the Crystal side of Node IPC framing is covered by
   `spec/fixtures/node_child.mjs`.
-- Deferred to Phase 7: reconciliation of children on older code versions
-  (such a child's link is closed) and reload frames (`prepare` is answered with
-  a failed vote, `unavailable/reload_unsupported`).
+- Deferred to Phase 7 (done there): reconciliation of children on older code
+  versions and reload frames.
 
 ## Phase 6 — cluster and process management ✅
 
@@ -177,13 +178,30 @@ the host manager.
 - `process_lock`: a Linux abstract-namespace Unix socket named like upstream's,
   a socket file in the temporary directory elsewhere.
 
-## Phase 7 — reload
+## Phase 7 — reload ✅
 
-- Process-level reload from decision 3, following upstream spec §7: load (start
-  the new worker binary), prepare/vote, gate, migrate, commit, retire; the edge
-  cases in the spec's "Decisions".
-- Acceptance: `tutorial.test.ts` section 09 (compatible reload, migration and
-  an old-contract adapter).
+- In-process reload from decision 3, following upstream spec §7 and
+  `reload.ts`: retire, load, prepare in recording mode, gate (admission cut,
+  leases, grandfathered roots, `gate_deadline`, exclusive resources), migrate
+  (`StateOptions`: per-cell `version` and `migrate`), commit in one
+  synchronous step, rollback, and the edge cases of the spec's "Decisions"
+  (pending code version for added types, `min_code_version`, task stop
+  deadline, listener events queued during the gate, removed types, lifetime
+  changes, retokened host-object references).
+- Code versions with the two-version rule, retirement on the last root (and
+  the parent's `retire`), forced retirement after `retire_deadline`, and
+  `superseded` for retired code versions; registry tables per code version.
+- Cross-host reload (`cluster.ts`): `prepare`/`vote`/`commit`/`abort`/`retire`
+  and `root_end` frames, `vote_deadline`, fencing and reconciliation of
+  children that connect behind (also during a reload), remembered child
+  modules and removal tombstones, `upgrade_required` for browsers.
+- Acceptance: `tutorial.test.ts` section 09, `reload`, `host-objects-reload`,
+  `cluster`, and the reload cases of `review`, `requests`, `host` and
+  `variants`. Not ported: `generations.test.ts` (V8 GC) and the white-box
+  "commit fails midway" case.
+- Conformance: `conformance/node_parent.ts` now runs a cluster reload in which
+  the Crystal child votes and commits; like the rest of the harness it has not
+  yet been run against upstream's sources.
 
 ## Phase 8 — SQLite and telemetry storage
 

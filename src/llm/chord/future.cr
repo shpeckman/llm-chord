@@ -135,6 +135,17 @@ module LLM::Chord
     future.wait
   end
 
+  def self.settle_within(futures : Enumerable(Future), span : Time::Span) : Bool
+    deadline = Time.instant + span
+    futures.each do |future|
+      next if future.settled?
+      remaining = deadline - Time.instant
+      return false if remaining <= Time::Span.zero
+      return false if future.wait(Array(AbortSignal).new, remaining).timed_out?
+    end
+    true
+  end
+
   def self.await_all(futures : Enumerable(Future)) : Nil
     futures.each(&.await_settled)
     futures.each { |future| future.error.try { |error| raise error } }

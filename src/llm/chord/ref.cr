@@ -203,6 +203,11 @@ module LLM::Chord
       @views[installed.implementation] ||= adapter.call(installed.implementation)
     end
 
+    protected def forget_views(services : Array(Service), implementations : Array(Implementation)) : Nil
+      @bindings.select! { |service, _| services.any?(&.same?(service)) }
+      @views.select! { |implementation, _| implementations.any?(&.same?(implementation)) }
+    end
+
     protected def current_view : Implementation?
       return unless @status.live?
       installed = @object.current_installed

@@ -4,16 +4,17 @@
 
 `llm-chord` is a Crystal port of
 [`@earendil-works/chord`](https://github.com/earendil-works/pi/tree/main/packages/chord).
-It is being ported in phases tracked in `ROADMAP.md`. Phases 1–6 are done:
+It is being ported in phases tracked in `ROADMAP.md`. Phases 1–7 are done:
 the delta module, replicated state, Context (values, cancellation,
 telemetry), the telemetry contracts and in-memory recorder, errors, output,
 schemas, contracts, the single-process runtime (hosts, objects, cells,
 references, roots, facets, registries), the wire protocol and links (memory,
 IPC, WebSocket; relays and routes), and child host processes (host manager,
-fork driver, child control, process lock) follow upstream semantics. Reload
-and SQLite are not ported yet. Values are `JSON::Any`.
+fork driver, child control, process lock), and in-process reload (code
+versions, gates, migration, retirement, cluster reloads and reconciliation)
+follow upstream semantics. SQLite is not ported yet. Values are `JSON::Any`.
 
-The one dependency is the `typebox` shard (`path: ../typebox`), a port of
+The one dependency is the `typebox` shard (`github: shpeckman/typebox`), a port of
 TypeBox 1.3.27's builders and `Value` functions. Schema behavior belongs
 there; llm-chord only uses it.
 
@@ -52,10 +53,12 @@ src/llm/chord/implementation.cr    Implementation builder, MethodFn, OpaqueBox(T
 src/llm/chord/ctx.cr               Ctx (call context), linked_signal, await_ready
 src/llm/chord/ref.cr               Ref (shared reference API), LocalRef, MemberReadable
 src/llm/chord/remote.cr            RemoteBinding (shared hold), ViewReadable, RemoteRef
-src/llm/chord/object.cr            Service, Decls, Run, Installed, ObjectImpl (activation, calls, disposal)
+src/llm/chord/object.cr            Service, Decls, Run, Installed, Gate, StagedListeners, ObjectImpl (activation, calls, leases, disposal)
 src/llm/chord/scope.cr             ObjectScope: what a factory declares (upstream's `self`)
-src/llm/chord/facet.cr             Facet, define_facet, FacetApi
-src/llm/chord/host.cr              Host: services, addresses, roots, registries, principals, links, routes, close
+src/llm/chord/facet.cr             Facet, define_facet, FacetApi, FacetLoader
+src/llm/chord/host.cr              CodeVersion; Host: services, addresses, roots, retirement, registries, principals, links, routes, close
+src/llm/chord/reload.cr            ReloadOptions, ReloadReport, Candidate, Reload (prepare, gate, migrate, commit, rollback)
+src/llm/chord/cluster.cr           Cluster (coordinated reload, reconciliation), ChildReloads (prepare/vote/commit on a child)
 src/llm/chord/wire.cr              PROTOCOL_VERSION, Frame, Packed, Wire (schema, errors, encodings)
 src/llm/chord/link.cr              Link, BaseLink, MemoryLink, IpcChannel, IpcLink
 src/llm/chord/connection.cr        LinkOptions, Connection: hello, holds, units, flow control, calls, relays
@@ -178,13 +181,39 @@ directory. The Node child spec is pending when `node` is missing.
 - `Listeners(T)` keeps listeners by integer id: callers snapshot before
   delivering and skip ids removed meanwhile, as upstream does with `Set`
   membership.
-- Not yet ported (Phase 7): code-version retirement, gates, leases,
-  `StateOptions`, `reload`, child reconciliation and reload frames.
-  `Host#code_version` stays 1 and admission only checks it.
+- Reload is in process (ROADMAP decision 3): facets are values, and a
+  `FacetLoader` maps the module names of `prepare` frames to compiled-in
+  facets. A host keeps `CodeVersion`s (`current`, `previous`, and a running
+  reload's `pending`), each with its services, registry tables, running roots
+  and an abort controller (forced retirement). An object installs an
+  implementation per retained code version whose service it was built from.
+- `Reload` follows upstream's `reload.ts` step by step: `prepare` (retire the
+  previous code version, load, check providers, prepare objects to a fixpoint,
+  gate, stage listeners) then `commit` (one `Publish.hold` step; work that may
+  start new-code roots is queued in `@starts` and runs after the coordinator's
+  `before_start` sent its commit frames). Everything fallible runs in prepare;
+  a commit that still raises fails the host (`unavailable/host_failed`).
+- A factory rerun gets the previous `Decls`: `ObjectScope` returns the kept
+  cell, reference and resource by name or address. Kept resources record an
+  adopter proc in `Decls#adopted`, run at commit. Listener subscriptions are
+  kept when origin and selector pointer match (`Subscription#same_source?`).
+- Leases: `ObjectImpl#call` and listener roots `lease` the object; the host's
+  `touch` table ends them in `end_root` (also for foreign roots, on `root_end`).
+  A gate grandfathers the leases present at its cut.
+- Cluster frames: the coordinator's `Cluster.reload` sends `prepare`, collects
+  `vote`s from `Connection#votes`, then `commit` or `abort`; `ChildReloads`
+  runs the child side. `Connection#admit_root` admits roots of fenced code
+  versions in the parent's current one.
 - The acceptance spec is `spec/tutorial_spec.cr`: upstream's
-  `tutorial.test.ts` sections 01–08, 10 and 11 (09 needs reload). `spec/cell_spec.cr`, `state_init_spec.cr`, `host_spec.cr` and
-  `readiness_spec.cr` translate the single-process cases of the matching
-  upstream tests.
+  `tutorial.test.ts` sections 01–11. `spec/cell_spec.cr`, `state_init_spec.cr`,
+  `host_spec.cr` and `readiness_spec.cr` translate the single-process cases of
+  the matching upstream tests; `reload_spec.cr`, `host_objects_reload_spec.cr`
+  and `cluster_spec.cr` translate `reload`, `host-objects-reload`, `cluster`
+  and the reload cases of `review`, `requests`, `host` and `variants`. Specs
+  that inspect state another fiber delivers (a commit frame over a memory link)
+  wait with `eventually`, where upstream relies on microtask order.
+  `generations.test.ts` (V8 `FinalizationRegistry`) and the white-box
+  "commit fails midway" case are not translatable.
 - `Link` collides with Crystal's top-level `@[Link]` annotation: specs and
   any code including `LLM::Chord` write `LLM::Chord::Link`.
 - Frames are `Frame` objects (fields plus an optional `Packed` payload), built
