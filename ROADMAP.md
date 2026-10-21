@@ -101,7 +101,7 @@ frames carry, so a Crystal child takes part in a Node coordinator's reload.
   generated cases.
 - Not ported, on purpose: chord's `JsonRevisionValidator` (neither exported
   nor used upstream) and pi-telemetry's typed schema helpers (TypeScript
-  type-level only). pi-telemetry's adapter conformance suite can come with
+  type-level only). pi-telemetry's adapter conformance suite came with
   Phase 8, where the SQLite recorder needs it.
 
 ## Phase 3 — schemas and contracts ✅
@@ -204,10 +204,27 @@ frames carry, so a Crystal child takes part in a Node coordinator's reload.
   the Crystal child votes and commits; like the rest of the harness it has not
   yet been run against upstream's sources.
 
-## Phase 8 — SQLite and telemetry storage
+## Phase 8 — SQLite and telemetry storage ✅
 
-- `sqlite`: portable database interface, atomic migrations, schema-prefix
-  validation, an adapter on `crystal-sqlite3` / `crystal-db` (the shard's first
-  dependencies).
-- `telemetry-sqlite`: buffered recording, retention, `TelemetryStore` queries.
+- `sqlite`: the portable `Database`/`Executor` interface, schema-prefix
+  validation, atomic migrations with a version table, and the adapter on
+  `crystal-sqlite3` / `crystal-db` (the shard's first native dependency),
+  matching `sqlite/node.ts`: one connection, strict call order, `BEGIN
+  IMMEDIATE`, stale transaction handles, rollback failures as
+  `AggregateError`, WAL setup and checkpoint on close. Separate entry points
+  (`llm-chord/sqlite`, `llm-chord/telemetry-sqlite`) keep `libsqlite3` out of
+  `require "llm-chord"`.
+- `telemetry-sqlite`: buffered recording, one-second flushes, ten-second
+  metric aggregation, queue bounds and drop counts, retention, permanent
+  failure, propagation, and `TelemetryStore` queries.
+- Decisions: stored JSON matches `JSON.stringify` byte for byte, so Crystal and
+  Node recorders share a database file; rows are `Hash(String, Value)`; time
+  comes from an injectable `LLM::Telemetry::Clock`.
+- In `llm-telemetry`: `Clock` (taken by `InMemoryTelemetryContext` too), and
+  pi-telemetry's adapter and store conformance suites as
+  `require "llm-telemetry/testing"`, run against both recorders.
+- Acceptance: `sqlite/migrations.test.ts`, `sqlite/node.test.ts`,
+  `telemetry-sqlite.test.ts`, `telemetry-sqlite-store.test.ts`, and the
+  conformance suites. Not ported: the Durable Object variants and rejections
+  with `undefined`.
 - `sqlite/cloudflare` has no Crystal target and stays out.

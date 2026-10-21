@@ -36,9 +36,14 @@ The port currently covers chord's foundation layer:
   the gate with leases and grandfathered roots, exclusive resources, the
   synchronous commit, and cluster reloads across hosts (prepare, vote, commit,
   abort, retire; fencing and reconciliation of children that connect behind).
+- `LLM::Chord::Sqlite` — `@earendil-works/chord/sqlite` and `/sqlite/node`:
+  a portable SQLite database interface, schema-prefix validation, atomic
+  migrations, and an adapter on `crystal-sqlite3`.
+- `LLM::Chord::SqliteTelemetry` — `@earendil-works/chord/telemetry-sqlite`: a
+  buffered SQLite telemetry recorder and `TelemetryStore`.
 
-SQLite is not ported yet; see [ROADMAP.md](ROADMAP.md). Values are Crystal's
-`JSON::Any`.
+Values are Crystal's `JSON::Any`. Chord's Cloudflare Durable Object adapter
+(`/sqlite/cloudflare`) has no Crystal target and is not ported.
 
 ## Requirements
 
@@ -52,14 +57,27 @@ dependencies:
     github: shpeckman/llm-chord
 ```
 
-llm-chord depends on the `typebox` shard (`github: shpeckman/typebox`) and the
-`llm-telemetry` shard (`github: shpeckman/llm-telemetry`) in its `shard.yml`.
+llm-chord depends on the `typebox` shard (`github: shpeckman/typebox`), the
+`llm-telemetry` shard (`github: shpeckman/llm-telemetry`) and `crystal-sqlite3`
+(`github: crystal-lang/crystal-sqlite3`, `~> 0.24.0`, with `crystal-db`
+0.15) in its `shard.yml`.
 
 Then `shards install`, and in your code:
 
 ```crystal
 require "llm-chord"
 ```
+
+The SQLite modules have their own entry points, so `require "llm-chord"` alone
+never links `libsqlite3`:
+
+```crystal
+require "llm-chord/sqlite"            # LLM::Chord::Sqlite
+require "llm-chord/telemetry-sqlite"  # LLM::Chord::SqliteTelemetry (also requires llm-chord/sqlite)
+```
+
+The SQLite modules need the SQLite 3 library and headers (3.37 or newer, for
+`STRICT` tables and the JSON functions).
 
 ## Tracking JSON deltas
 
@@ -737,6 +755,133 @@ cursor gap, an unsafe cursor, or a failing attachment disposes the attachment
 and reports to `on_error` (an `AggregateError` when disposal also fails).
 `dispose` is idempotent.
 
+## SQLite
+
+```crystal
+require "llm-chord/sqlite"
+
+S = LLM::Chord::Sqlite
+
+db = S.open_database("data/state.db")   # or ":memory:"
+S.apply_migrations(db, [
+  S::Migration.new(1, ["CREATE TABLE notes (body TEXT)"]),
+  S::Migration.new(2, ["ALTER TABLE notes ADD COLUMN title TEXT"]),
+], table: "notes_schema")
+
+db.run("INSERT INTO notes (body, title) VALUES (?, ?)", "hello", nil)
+db.get("SELECT body FROM notes")         # => {"body" => "hello"}
+db.all("SELECT * FROM notes")            # => [{"body" => "hello", "title" => nil}]
+db.transaction do |tx|
+  tx.run("UPDATE notes SET title = ?", "greeting")
+end
+db.close
+```
+
+`Sqlite::Database` is chord's portable `SqliteDatabase` facade:
+
+| Member | Meaning |
+| --- | --- |
+| `exec(sql)` | Runs SQL text without bindings; it may contain several statements. |
+| `run(sql, *params)` | Runs one statement with positional bindings. |
+| `get(sql, *params)` | The first row (`Row?`). |
+| `all(sql, *params)` | Every row (`Array(Row)`). |
+| `transaction { \|tx\| ... }` | Runs the block in a transaction and returns its value. All its work must use `tx`, which raises `Sqlite::Error` ("SQLite transaction handle is no longer active") once the block returns. |
+| `close` | Closes the database; idempotent. |
+
+- Values are `Sqlite::Value` (`Int64 | Float64 | String | Bytes | Nil`);
+  `run`, `get` and `all` also take other `Int` and `Float` values. A row is a
+  `Sqlite::Row` (`Hash(String, Value)`) keyed by column name.
+- Bindings are values, never interpolated SQL: prepared statements are cached
+  by SQL text on the connection.
+- A failing block rolls the transaction back and raises the block's own
+  exception. If the rollback fails too, it raises an `AggregateError` instead,
+  so a caller cannot mistake the error for a guaranteed rollback.
+- `Executor` is the interface of a database and a transaction handle. An
+  adapter implements `exec`, `run_values`, `get_values` and `all_values`
+  (taking `Array(Value)`); `run`, `get` and `all` convert and delegate.
+
+`Sqlite.open_database(path, wal_autocheckpoint_pages: 1_000, busy_timeout_ms: 5_000)`
+returns a `Sqlite3Database`: one `crystal-sqlite3` connection (not a pool, so a
+`:memory:` database is one database). It creates the file's directory, sets
+`journal_mode = WAL`, `synchronous = NORMAL`, the WAL auto-checkpoint
+threshold (`0` disables it) and the time SQLite waits for a competing lock.
+
+- Operations run strictly in call order, on any fiber: a transaction holds the
+  queue until its block returns, and calls made meanwhile wait behind it, so
+  they neither see its uncommitted rows nor join its rollback. Calling the
+  database itself (not `tx`) from inside a transaction block waits for that
+  transaction, which never ends.
+- Transactions begin with `BEGIN IMMEDIATE`. `close` checkpoints the WAL with
+  `TRUNCATE`; operations on a closed database raise `Sqlite::Error`.
+- SQL errors raise `SQLite3::Exception`.
+
+`Sqlite.apply_migrations(db, migrations, table:)` applies every pending
+migration atomically: the version table's creation and every pending
+migration commit or roll back together. Versions must be `1, 2, 3, ...`; the
+table (`singleton`, `version`, `STRICT`) records the version reached, a database
+newer than the last migration raises, and independent tables keep independent
+histories. `Sqlite.validate_schema_prefix(prefix)` accepts identifiers
+(`[A-Za-z_][A-Za-z0-9_]*`) that do not start with `sqlite_` in any case; the
+migration table name is validated before any SQL runs. Both raise
+`Sqlite::Error` with chord's messages.
+
+## SQLite telemetry
+
+```crystal
+require "llm-chord/telemetry-sqlite"
+
+db = LLM::Chord::Sqlite.open_database("data/telemetry.db")
+telemetry = LLM::Chord.create_sqlite_telemetry(db)
+
+telemetry.start_span(LLM::Telemetry::SpanOptions.new("request")) do |span|
+  span.add_event("loaded")
+  telemetry.counter("requests").add(1, LLM::Telemetry.attributes(route: "/"))
+end
+
+telemetry.flush
+telemetry.find_traces(LLM::Telemetry::TraceQuery.new(name: "request"))
+telemetry.close   # stops recording and drains; the database stays open
+db.close
+```
+
+`create_sqlite_telemetry(db, retention: 7.days, max_queued_spans: 10_000, clock: LLM::Telemetry::SYSTEM_CLOCK)`
+migrates its tables (`telemetry_spans`, `telemetry_metrics`, versioned in
+`telemetry_schema`) and returns a `SqliteTelemetry`: an
+`LLM::Telemetry::TelemetryContext` that is also its own `Metrics`,
+`Propagation` and `TelemetryStore`.
+
+- Recording never runs SQL. Only settled spans are stored, with their
+  attributes, events (time relative to the span's start), links and status.
+  Metrics aggregate `count`, `sum`, `min` and `max` per series (name, kind,
+  unit, attributes) and ten-second interval; descriptions and histogram
+  boundaries are not kept.
+- A flush runs every second. `flush` persists settled spans and completed
+  intervals; `close` also writes partial intervals. Each flush is one
+  transaction, which also deletes rows older than `retention`. Flushes are
+  serialized, and concurrent `close` calls share one drain.
+- `max_queued_spans` bounds the settled spans awaiting commit, including the
+  batch being written, and separately the pending metric interval/series pairs.
+  What does not fit is counted in `dropped_spans` and `dropped_measurements`.
+- A write failure stops recording for good: `flush` and `close` raise that same
+  exception from then on, without retrying.
+- After `close`, recording is inert (spans still run their blocks) and the
+  store still reads committed rows.
+- `inject`/`extract` carry the span identity under `pi-sqlite-span` and
+  `pi-sqlite-trace`, so a trace continues across processes and recorders. Span
+  ids are `<recorder UUID>:<sequence>`; a root span's trace id is its own id.
+- Reads see committed rows only; `flush` first to include new spans.
+  `find_traces` pages with an opaque cursor in two queries per page, filtering
+  by the first span's name and start, any error, and attributes all present
+  on one span (a boolean never equals a number).
+- Stored JSON (attributes, events, links, status and the series key) is
+  written exactly as `JSON.stringify` writes it, so Crystal and Node recorders
+  can share one database file and merge aggregates. Consequently a whole
+  `Float64` attribute such as `2.0` is stored as `2` and reads back as
+  `Int64`.
+- `clock` (an `LLM::Telemetry::Clock`) provides the wall time, the monotonic
+  time and the one-second timer; pass an `LLM::Telemetry::Testing::ManualClock`
+  to control them in tests.
+
 ## Public API reference
 
 - `LLM::Chord::Delta.track(initial) : Tracker`
@@ -808,6 +953,18 @@ and reports to `on_error` (an `AggregateError` when disposal also fails).
   `LLM::Chord.child_control`, `.process_lock`, `LOCK_ENV`
 - `Facet`, `LLM::Chord.define_facet`, `FacetApi`, `Registry(V)`, `RegistryConflict`,
   `RegistryView(V)`, `LLM::Chord.define_registry`
+- `LLM::Chord::Schema.stringify` (insertion-order `JSON.stringify`)
+- `LLM::Chord::Sqlite` (`require "llm-chord/sqlite"`): `Value`, `Row`, `Error`, `Executor`
+  (`#exec`, `#run`, `#get`, `#all`, `#run_values`, `#get_values`, `#all_values`), `Database`
+  (`#transaction`, `#close`), `Migration`, `.apply_migrations`, `.validate_schema_prefix`,
+  `.open_database`, `Sqlite3Database` (`#closed?`), `Sqlite3Executor`, `Sqlite3Transaction`,
+  `SerialQueue`, `DEFAULT_WAL_AUTOCHECKPOINT_PAGES`, `DEFAULT_BUSY_TIMEOUT_MS`
+- `LLM::Chord.create_sqlite_telemetry` (`require "llm-chord/telemetry-sqlite"`), `SqliteTelemetry`
+  (`#start_span`, `#counter`, `#up_down_counter`, `#histogram`, `#inject`, `#extract`, `#get_trace`,
+  `#find_traces`, `#find_metrics`, `#flush`, `#close`, `#dropped_spans`, `#dropped_measurements`,
+  `#stopped?`; `.get_trace`, `.find_traces`, `.find_metrics` over a database; `SPAN_KEY`,
+  `TRACE_KEY`, `INTERVAL_MS`, `FLUSH_INTERVAL`, `DEFAULT_RETENTION`, `DEFAULT_MAX_QUEUED_SPANS`,
+  `MIGRATIONS`)
 
 ## Differences from chord
 
@@ -863,6 +1020,16 @@ and reports to `on_error` (an `AggregateError` when disposal also fails).
 - The fork driver spawns an executable with arguments (`entry`, `args`) rather
   than a Node module with `execArgv`; to run a Node child, pass `node` and the
   script.
+- SQLite operations block the calling fiber instead of returning promises, and
+  rows are `Hash(String, Value)` rather than typed objects (`get<T>`). The
+  adapter is `crystal-sqlite3` where chord uses `node:sqlite`; its
+  `open_database` is chord's `openNodeSqliteDatabase`, with `busy_timeout_ms`
+  and `wal_autocheckpoint_pages` for `busyTimeoutMs` and
+  `walAutoCheckpointPages`. A closed database raises `Sqlite::Error`.
+- `create_sqlite_telemetry` takes `retention` as a `Time::Span` (chord's
+  `retentionMs`) and an injectable `clock`, where chord reads `Date.now`,
+  `performance.now` and `setInterval`. A span that raised gets the exception's
+  class name as its error name.
 
 ## Development
 
@@ -871,6 +1038,10 @@ shards install
 crystal spec
 ameba
 ```
+
+The SQLite specs use in-memory databases (and one temporary file). The
+SQLite telemetry specs run `llm-telemetry`'s adapter and store conformance
+suites (`require "llm-telemetry/testing"`) against `SqliteTelemetry`.
 
 `conformance/run.sh` links Crystal and Node hosts to each other (a Node
 server with a Crystal child over IPC, a Node browser on a Crystal server over a
