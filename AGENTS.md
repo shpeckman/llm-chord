@@ -27,59 +27,61 @@ There are three dependencies:
   recorder, `render_trace`, clocks, and the adapter and store conformance
   suites (`require "llm-telemetry/testing"`). Telemetry behavior belongs there.
 - `crystal-sqlite3` (`github: crystal-lang/crystal-sqlite3`, `~> 0.24.0`) on
-  `crystal-db` 0.15, used only by `src/llm/chord/sqlite/sqlite3.cr`.
+  `crystal-db` 0.15, used only by `src/llm-chord/sqlite/sqlite3.cr`.
 
 Upstream is the specification. When behavior is in doubt, read the upstream
 source and tests (`packages/chord/src`, `packages/chord/test`) and match them.
 
 ## Repository layout
 
+All code lives under `src/llm-chord/`, next to the entry point `src/llm-chord.cr`. Crystal resolves `require "llm-chord/x"` to `src/llm-chord/x.cr`, so the entry points `src/llm-chord/sqlite.cr` and `src/llm-chord/telemetry-sqlite.cr` share the folder with the implementation of `LLM::Chord`. Paths follow the shard name, not the module path.
+
 ```
 src/llm-chord.cr                   Entry point: requires the tree, opens LLM::Chord
 src/llm-chord/sqlite.cr            Entry point for `require "llm-chord/sqlite"` (llm-chord plus the SQLite module)
 src/llm-chord/telemetry-sqlite.cr  Entry point for `require "llm-chord/telemetry-sqlite"`
-src/llm/chord/json.cr              deep_copy, copy_json, identical?, equal?, to_any, js_string
-src/llm/chord/errors.cr            ChordError, ErrorCode, AggregateError, helpers
-src/llm/chord/context.cr           Context, ContextKey(T), AbortSignal/AbortController, await, telemetry
-src/llm/chord/output.cr            bound, sanitize, Buffer (streaming UTF-8 decoder), Progress, clocks
-src/llm/chord/delta/types.cr       Seg/Path/WireOp, Op hierarchy, from_tuple/to_tuple, validation, errors
-src/llm/chord/delta/utf16.cr       UTF-16 code-unit counting and slicing
-src/llm/chord/delta/overlap.cr     String suffix/prefix overlap helper
-src/llm/chord/delta/diff.cr        diff_revisions (identity-anchored structural diff)
-src/llm/chord/delta/apply.cr       apply, apply_immutable, apply_immutable_batches (copy-on-write)
-src/llm/chord/delta/codec.cr       Encoder/Decoder (path interning + arity omission)
-src/llm/chord/delta/draft.cr       Draft: revocable copy-on-write handles
-src/llm/chord/delta/tracker.cr     Overlay, Change, Prepared, Tracker, track
-src/llm/chord/state.cr             replicated_state: publisher, subscribers, mutable and attached state
-src/llm/chord/schema.cr            canonical_json, hash64, normalize, canonical_identity, assert_valid, fits?
-src/llm/chord/contract.cr          method/opaque, placement, remote/local, Description, coverage, bind
-src/llm/chord/future.cr            Future(T) (promise analogue on fibers), race, await_all
-src/llm/chord/publish.cr           Publish: the one FIFO queue for every observer notification
-src/llm/chord/readable.cr          RefStatus, Shape, StateEvent, Subscribable, Readable, Listeners(T), json_value
-src/llm/chord/cell.cr              Fanout, Source, Cell (boxed tracker), Derived, compute_dependents
-src/llm/chord/registry.cr          Registry(V), RegistryValue(V), RegistryView(V), define_registry
-src/llm/chord/resource.cr          AnyResource, Resource(T), Exposed
-src/llm/chord/implementation.cr    Implementation builder, MethodFn, OpaqueBox(T)
-src/llm/chord/ctx.cr               Ctx (call context), linked_signal, await_ready
-src/llm/chord/ref.cr               Ref (shared reference API), LocalRef, MemberReadable
-src/llm/chord/remote.cr            RemoteBinding (shared hold), ViewReadable, RemoteRef
-src/llm/chord/object.cr            Service, Decls, Run, Installed, Gate, StagedListeners, ObjectImpl (activation, calls, leases, disposal)
-src/llm/chord/scope.cr             ObjectScope: what a factory declares (upstream's `self`)
-src/llm/chord/facet.cr             Facet, define_facet, FacetApi, FacetLoader
-src/llm/chord/host.cr              CodeVersion; Host: services, addresses, roots, retirement, registries, principals, links, routes, close
-src/llm/chord/reload.cr            ReloadOptions, ReloadReport, Candidate, Reload (prepare, gate, migrate, commit, rollback)
-src/llm/chord/cluster.cr           Cluster (coordinated reload, reconciliation), ChildReloads (prepare/vote/commit on a child)
-src/llm/chord/wire.cr              PROTOCOL_VERSION, Frame, Packed, Wire (schema, errors, encodings)
-src/llm/chord/link.cr              Link, BaseLink, MemoryLink, IpcChannel, IpcLink
-src/llm/chord/connection.cr        LinkOptions, Connection: hello, holds, units, flow control, calls, relays
-src/llm/chord/websocket.cr         WebSocketLink, accept_web_sockets
-src/llm/chord/manager.cr           Fork driver (posix_spawn), HostManager, ChildControl, process_lock
-src/llm/chord/sqlite/database.cr   Value, Row, Error, Executor, Database (upstream sqlite/database.ts)
-src/llm/chord/sqlite/schema.cr     validate_schema_prefix (sqlite/schema.ts)
-src/llm/chord/sqlite/migrations.cr Migration, apply_migrations (sqlite/migrations.ts)
-src/llm/chord/sqlite/sqlite3.cr    SerialQueue, Sqlite3Database, Sqlite3Transaction, open_database (sqlite/node.ts)
-src/llm/chord/telemetry_sqlite/recorder.cr  SqliteTelemetry: recording, buffering, flush/close, create_sqlite_telemetry (telemetry-sqlite/index.ts)
-src/llm/chord/telemetry_sqlite/store.cr     SqliteTelemetry.get_trace/find_traces/find_metrics (telemetry-sqlite/store.ts)
+src/llm-chord/json.cr              deep_copy, copy_json, identical?, equal?, to_any, js_string
+src/llm-chord/errors.cr            ChordError, ErrorCode, AggregateError, helpers
+src/llm-chord/context.cr           Context, ContextKey(T), AbortSignal/AbortController, await, telemetry
+src/llm-chord/output.cr            bound, sanitize, Buffer (streaming UTF-8 decoder), Progress, clocks
+src/llm-chord/delta/types.cr       Seg/Path/WireOp, Op hierarchy, from_tuple/to_tuple, validation, errors
+src/llm-chord/delta/utf16.cr       UTF-16 code-unit counting and slicing
+src/llm-chord/delta/overlap.cr     String suffix/prefix overlap helper
+src/llm-chord/delta/diff.cr        diff_revisions (identity-anchored structural diff)
+src/llm-chord/delta/apply.cr       apply, apply_immutable, apply_immutable_batches (copy-on-write)
+src/llm-chord/delta/codec.cr       Encoder/Decoder (path interning + arity omission)
+src/llm-chord/delta/draft.cr       Draft: revocable copy-on-write handles
+src/llm-chord/delta/tracker.cr     Overlay, Change, Prepared, Tracker, track
+src/llm-chord/state.cr             replicated_state: publisher, subscribers, mutable and attached state
+src/llm-chord/schema.cr            canonical_json, hash64, normalize, canonical_identity, assert_valid, fits?
+src/llm-chord/contract.cr          method/opaque, placement, remote/local, Description, coverage, bind
+src/llm-chord/future.cr            Future(T) (promise analogue on fibers), race, await_all
+src/llm-chord/publish.cr           Publish: the one FIFO queue for every observer notification
+src/llm-chord/readable.cr          RefStatus, Shape, StateEvent, Subscribable, Readable, Listeners(T), json_value
+src/llm-chord/cell.cr              Fanout, Source, Cell (boxed tracker), Derived, compute_dependents
+src/llm-chord/registry.cr          Registry(V), RegistryValue(V), RegistryView(V), define_registry
+src/llm-chord/resource.cr          AnyResource, Resource(T), Exposed
+src/llm-chord/implementation.cr    Implementation builder, MethodFn, OpaqueBox(T)
+src/llm-chord/ctx.cr               Ctx (call context), linked_signal, await_ready
+src/llm-chord/ref.cr               Ref (shared reference API), LocalRef, MemberReadable
+src/llm-chord/remote.cr            RemoteBinding (shared hold), ViewReadable, RemoteRef
+src/llm-chord/object.cr            Service, Decls, Run, Installed, Gate, StagedListeners, ObjectImpl (activation, calls, leases, disposal)
+src/llm-chord/scope.cr             ObjectScope: what a factory declares (upstream's `self`)
+src/llm-chord/facet.cr             Facet, define_facet, FacetApi, FacetLoader
+src/llm-chord/host.cr              CodeVersion; Host: services, addresses, roots, retirement, registries, principals, links, routes, close
+src/llm-chord/reload.cr            ReloadOptions, ReloadReport, Candidate, Reload (prepare, gate, migrate, commit, rollback)
+src/llm-chord/cluster.cr           Cluster (coordinated reload, reconciliation), ChildReloads (prepare/vote/commit on a child)
+src/llm-chord/wire.cr              PROTOCOL_VERSION, Frame, Packed, Wire (schema, errors, encodings)
+src/llm-chord/link.cr              Link, BaseLink, MemoryLink, IpcChannel, IpcLink
+src/llm-chord/connection.cr        LinkOptions, Connection: hello, holds, units, flow control, calls, relays
+src/llm-chord/websocket.cr         WebSocketLink, accept_web_sockets
+src/llm-chord/manager.cr           Fork driver (posix_spawn), HostManager, ChildControl, process_lock
+src/llm-chord/sqlite/database.cr   Value, Row, Error, Executor, Database (upstream sqlite/database.ts)
+src/llm-chord/sqlite/schema.cr     validate_schema_prefix (sqlite/schema.ts)
+src/llm-chord/sqlite/migrations.cr Migration, apply_migrations (sqlite/migrations.ts)
+src/llm-chord/sqlite/sqlite3.cr    SerialQueue, Sqlite3Database, Sqlite3Transaction, open_database (sqlite/node.ts)
+src/llm-chord/telemetry_sqlite/recorder.cr  SqliteTelemetry: recording, buffering, flush/close, create_sqlite_telemetry (telemetry-sqlite/index.ts)
+src/llm-chord/telemetry_sqlite/store.cr     SqliteTelemetry.get_trace/find_traces/find_metrics (telemetry-sqlite/store.ts)
 spec/                              Crystal specs, largely translated from upstream tests
 spec/fixtures/                     Child processes for the manager specs (Crystal worker, Node child)
 spec/support/                      Shared spec code: the SQLite telemetry fixtures and spy database
@@ -109,7 +111,7 @@ specs need libsqlite3 (3.37+) and use in-memory databases.
 ## Code standards
 
 - Every Crystal file opens with a single comment naming its path, e.g.
-  `# src/llm/chord/delta/diff.cr`. No other comments in code.
+  `# src/llm-chord/delta/diff.cr`. No other comments in code.
 - Compiler-friendly, performance-focused, idiomatic Crystal; data-driven design.
 - The usage-facing API must be ergonomic.
 - Prevent shotgun surgery: a behavior change should touch one cohesive spot.
