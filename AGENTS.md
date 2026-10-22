@@ -4,16 +4,15 @@
 
 `llm-chord` is a Crystal port of
 [`@earendil-works/chord`](https://github.com/earendil-works/pi/tree/main/packages/chord).
-It is being ported in phases tracked in `ROADMAP.md`. Phases 1–8 are done:
-the delta module, replicated state, Context (values, cancellation,
-telemetry), errors, output,
-schemas, contracts, the single-process runtime (hosts, objects, cells,
-references, roots, facets, registries), the wire protocol and links (memory,
-IPC, WebSocket; relays and routes), and child host processes (host manager,
-fork driver, child control, process lock), in-process reload (code
-versions, gates, migration, retirement, cluster reloads and reconciliation),
-and SQLite (the portable database interface, migrations, the crystal-sqlite3
-adapter, and the SQLite telemetry recorder) follow upstream semantics.
+The port covers the delta module, replicated state, Context (values,
+cancellation, telemetry), errors, output, schemas, contracts, the
+single-process runtime (hosts, objects, cells, references, roots, facets,
+registries), the wire protocol and links (memory, IPC, WebSocket; relays and
+routes), child host processes (host manager, fork driver, child control,
+process lock), in-process reload (code versions, gates, migration,
+retirement, cluster reloads and reconciliation), and SQLite (the portable
+database interface, migrations, the crystal-sqlite3 adapter, and the SQLite
+telemetry recorder). All of it follows upstream semantics.
 Upstream's Cloudflare adapter is out of scope. Values are `JSON::Any`.
 
 There are three dependencies:
@@ -87,7 +86,6 @@ spec/fixtures/                     Child processes for the manager specs (Crysta
 spec/support/                      Shared spec code: the SQLite telemetry fixtures and spy database
 conformance/                       Crystal ↔ Node link conformance harness (run.sh, needs CHORD_SRC)
 bench/                             Release-mode micro-benchmarks
-ROADMAP.md                         Porting phases and settled design decisions
 .ameba.yml                         Ameba linter config
 ```
 
@@ -117,8 +115,7 @@ specs need libsqlite3 (3.37+) and use in-memory databases.
 - Prevent shotgun surgery: a behavior change should touch one cohesive spot.
 - Never use `out` as an identifier — it is a reserved keyword.
 - Never edit the `version` field in `shard.yml`.
-- Keep `README.md` (usage and public API), this file, and `ROADMAP.md` in sync
-  with the code.
+- Keep `README.md` (usage and public API) and this file in sync with the code.
 
 ## Conventions specific to this codebase
 
@@ -163,12 +160,12 @@ specs need libsqlite3 (3.37+) and use in-memory databases.
   `AbortSignal#remover` and `SystemClock#disarmer` do.
 - `Output` counts bytes on UTF-8 strings; its byte decoder follows the WHATWG
   UTF-8 decoder exactly, including how many U+FFFD an invalid sequence yields.
-- The differential harness used during Phase 1 generated cases with upstream's
-  `diffRevisions` and `track` under Node and compared op batches and values;
-  re-run something similar when changing `diff.cr` or the tracker. Phase 2 did
-  the same for `Output.bound`, `sanitize`, and `Buffer` snapshots, including
+- The delta module was checked with a differential harness that generated
+  cases with upstream's `diffRevisions` and `track` under Node and compared op
+  batches and values; re-run something similar when changing `diff.cr` or the
+  tracker. The output module was checked the same way for `Output.bound`, `sanitize`, and `Buffer` snapshots, including
   byte chunks with invalid UTF-8, BOMs, and skips.
-- Phase 3 ran upstream's `src/contract.ts` and `src/schema.ts` directly under
+- Schemas and contracts were checked by running upstream's `src/contract.ts` and `src/schema.ts` directly under
   `node --experimental-strip-types` (with `typebox` linked into the package's
   `node_modules`) on generated contracts, and compared descriptions,
   fingerprints, `hash64`, normalized inputs and identities, `coverage`, and
@@ -201,7 +198,7 @@ specs need libsqlite3 (3.37+) and use in-memory databases.
 - `Listeners(T)` keeps listeners by integer id: callers snapshot before
   delivering and skip ids removed meanwhile, as upstream does with `Set`
   membership.
-- Reload is in process (ROADMAP decision 3): facets are values, and a
+- Reload is in process: facets are values, and a
   `FacetLoader` maps the module names of `prepare` frames to compiled-in
   facets. A host keeps `CodeVersion`s (`current`, `previous`, and a running
   reload's `pending`), each with its services, registry tables, running roots
@@ -270,7 +267,7 @@ specs need libsqlite3 (3.37+) and use in-memory databases.
 - SQLite telemetry writes JSON with `Schema.stringify` (insertion order) and
   series attributes with `Schema.canonical_json` (sorted keys), both exactly as
   `JSON.stringify` writes them, so the database file is shared with Node
-  recorders (ROADMAP Phase 8 decision). Never use `to_json` for stored JSON.
+  recorders. Never use `to_json` for stored JSON.
 - `SqliteTelemetry` recognizes spans by type (`identity_of` over `LiveSpan`
   and `ExtractedParent`), the equivalent of upstream's module-wide `WeakMap`.
   Time, durations and the flush timer come from its `LLM::Telemetry::Clock`;
