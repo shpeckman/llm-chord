@@ -1,5 +1,5 @@
 # src/llm-chord/websocket.cr
-require "http/web_socket"
+require "http/server"
 require "http/server/handlers/websocket_handler"
 
 module LLM::Chord
